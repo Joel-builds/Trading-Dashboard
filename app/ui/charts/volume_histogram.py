@@ -1,8 +1,9 @@
+from bisect import bisect_left, bisect_right
 import pyqtgraph as pg
 from PyQt6.QtGui import QColor
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
-from .performance import calculate_visible_range, calculate_lod_step, MAX_VISIBLE_BARS_DENSE
+from .performance import calculate_lod_step, MAX_VISIBLE_BARS_DENSE
 
 
 def update_volume_histogram(
@@ -27,7 +28,19 @@ def update_volume_histogram(
     except Exception:
         viewbox = None
 
-    start_idx, end_idx = calculate_visible_range(viewbox, len(data), margin=10)
+    x_positions_all = []
+    for idx, item in enumerate(data):
+        x_positions_all.append(extract_x(item, idx))
+    if viewbox and x_positions_all:
+        try:
+            (x_range, _) = viewbox.viewRange()
+            x_min, x_max = x_range
+            start_idx = max(0, bisect_left(x_positions_all, x_min) - 10)
+            end_idx = min(len(data), bisect_right(x_positions_all, x_max) + 10)
+        except Exception:
+            start_idx, end_idx = 0, len(data)
+    else:
+        start_idx, end_idx = 0, len(data)
     visible_count = max(0, end_idx - start_idx)
     step = calculate_lod_step(visible_count, MAX_VISIBLE_BARS_DENSE)
 

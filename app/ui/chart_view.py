@@ -1,13 +1,14 @@
 import os
 import time
+from datetime import datetime
 from typing import Optional, List
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter, QButtonGroup
 from PyQt6.QtGui import QFont
-from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer
 
 from core.data_store import DataStore
-from core.data_fetch import load_recent_bars, load_symbols, load_more_history
+from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars
 from .theme import theme
 from .charts.candlestick_chart import CandlestickChart
 
@@ -16,7 +17,19 @@ class DataFetchWorker(QThread):
     data_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, mode: str, store: DataStore, exchange: str, symbol: str, timeframe: str, bar_count: int) -> None:
+    def __init__(
+        self,
+        mode: str,
+        store: DataStore,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        bar_count: int,
+        current_min_ts: Optional[int] = None,
+        current_max_ts: Optional[int] = None,
+        window_start_ms: Optional[int] = None,
+        window_end_ms: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.mode = mode
         self.store = store
@@ -24,13 +37,40 @@ class DataFetchWorker(QThread):
         self.symbol = symbol
         self.timeframe = timeframe
         self.bar_count = bar_count
+        self.current_min_ts = current_min_ts
+        self.current_max_ts = current_max_ts
+        self.window_start_ms = window_start_ms
+        self.window_end_ms = window_end_ms
 
     def run(self) -> None:
         try:
             if self.mode == 'load':
                 bars = load_recent_bars(self.store, self.exchange, self.symbol, self.timeframe, self.bar_count)
+            elif self.mode == 'load_cached':
+                bars = load_cached_bars(self.store, self.exchange, self.symbol, self.timeframe, self.bar_count)
+            elif self.mode == 'load_cached_full':
+                bars = load_cached_full(self.store, self.exchange, self.symbol, self.timeframe)
             elif self.mode == 'backfill':
-                bars = load_more_history(self.store, self.exchange, self.symbol, self.timeframe, self.bar_count)
+                bars = load_more_history(
+                    self.store,
+                    self.exchange,
+                    self.symbol,
+                    self.timeframe,
+                    self.bar_count,
+                    self.current_min_ts,
+                    self.current_max_ts,
+                )
+            elif self.mode == 'window':
+                if self.window_start_ms is None or self.window_end_ms is None:
+                    raise ValueError('Missing window range for window load')
+                bars = load_window_bars(
+                    self.store,
+                    self.exchange,
+                    self.symbol,
+                    self.timeframe,
+                    int(self.window_start_ms),
+                    int(self.window_end_ms),
+                )
             else:
                 raise ValueError(f'Unknown fetch mode: {self.mode}')
             self.data_ready.emit(bars)
@@ -186,7 +226,7 @@ class LiveTradeWorker(QThread):
 
 
 class ChartView(QWidget):
-    def __init__(self, error_sink=None) -> None:
+    def __init__(self, error_sink=None, debug_sink=None) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -206,20 +246,20 @@ class ChartView(QWidget):
 
         toolbar_layout.addWidget(QLabel('Timeframe'))
         self.timeframe_buttons: dict[str, QPushButton] = {}
+        self.timeframe_group = QButtonGroup(self)
+        self.timeframe_group.setExclusive(True)
         self.current_timeframe = '1m'
-        for tf in ['1m', '5m', '15m', '1h', '4h', '1d']:
+        for tf in ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M']:
             button = QPushButton(tf)
             button.setCheckable(True)
             button.clicked.connect(lambda _checked, val=tf: self._set_timeframe(val))
             self.timeframe_buttons[tf] = button
+            self.timeframe_group.addButton(button)
             toolbar_layout.addWidget(button)
         self.timeframe_buttons[self.current_timeframe].setChecked(True)
 
-        self.load_button = QPushButton('Load')
+        self.load_button = QPushButton('Reset Cache')
         toolbar_layout.addWidget(self.load_button)
-
-        self.backfill_button = QPushButton('Load More')
-        toolbar_layout.addWidget(self.backfill_button)
 
         self.status_label = QLabel('')
         toolbar_layout.addWidget(self.status_label)
@@ -235,14 +275,17 @@ class ChartView(QWidget):
         self._apply_axis_style()
 
         layout.addWidget(self.plot_widget)
+        self.plot_widget.getViewBox().sigRangeChanged.connect(self._on_view_range_changed)
 
         self.candles = CandlestickChart(self.plot_widget, theme.UP, theme.DOWN)
         self._setup_data_store()
         self._load_symbols()
 
         self.load_button.clicked.connect(self._on_load_clicked)
-        self.backfill_button.clicked.connect(self._on_backfill_clicked)
         self.error_sink = error_sink
+        self.debug_sink = debug_sink
+        self._debug_last_update = 0.0
+        self.symbol_box.currentIndexChanged.connect(self._on_symbol_changed)
 
     def _apply_axis_style(self) -> None:
         axis_pen = pg.mkPen(theme.GRID)
@@ -267,6 +310,22 @@ class ChartView(QWidget):
         self._kline_worker: Optional[LiveKlineWorker] = None
         self._trade_worker: Optional[LiveTradeWorker] = None
         self._symbol_filter = None
+        self._auto_backfill_last = 0.0
+        self._last_fetch_mode = 'load'
+        self._backfill_pending = False
+        self._backfill_timer = QTimer(self)
+        self._backfill_timer.setSingleShot(True)
+        self._backfill_timer.timeout.connect(self._trigger_window_load)
+        self._pending_backfill_view: Optional[tuple[float, float]] = None
+        self._window_bars = 2000
+        self._window_buffer_bars = 500
+        self._window_start_ms: Optional[int] = None
+        self._window_end_ms: Optional[int] = None
+        self._ignore_view_range = False
+        self._max_visible_bars = 1000
+        self._clamp_in_progress = False
+        self._fetch_start_ms: Optional[int] = None
+        self._last_fetch_duration_ms: Optional[int] = None
 
     def _load_symbols(self) -> None:
         if self._symbol_worker and self._symbol_worker.isRunning():
@@ -280,9 +339,14 @@ class ChartView(QWidget):
 
     def _on_symbols_ready(self, symbols: List[str]) -> None:
         if symbols:
+            self.symbol_box.blockSignals(True)
+            self.symbol_box.clear()
             self.symbol_box.addItems(symbols)
             if 'BTCUSDT' in symbols:
-                self.symbol_box.setCurrentText('BTCUSDT')
+                idx = self.symbol_box.findText('BTCUSDT')
+                if idx >= 0:
+                    self.symbol_box.setCurrentIndex(idx)
+            self.symbol_box.blockSignals(False)
             self._setup_symbol_search()
         self._load_initial_data()
 
@@ -310,28 +374,51 @@ class ChartView(QWidget):
         self.symbol_box.setCompleter(completer)
         self.symbol_box.lineEdit().textEdited.connect(proxy.setFilterFixedString)
 
-    def _load_initial_data(self) -> None:
+    def _load_initial_data(self, use_cache_only: bool = False) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.current_timeframe
         bar_count = 500
         self.candles.set_timeframe(timeframe)
-        self._start_fetch('load', symbol, timeframe, bar_count)
+        mode = 'load_cached' if use_cache_only else 'load'
+        self._start_fetch(mode, symbol, timeframe, bar_count)
 
     def _on_load_clicked(self) -> None:
         self._load_initial_data()
 
-    def _on_backfill_clicked(self) -> None:
+    def _on_symbol_changed(self) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.current_timeframe
-        bar_count = 2000
-        self.candles.set_timeframe(timeframe)
-        self._start_fetch('backfill', symbol, timeframe, bar_count)
+        cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
+        self._load_initial_data(use_cache_only=bool(cached_range))
 
-    def _start_fetch(self, mode: str, symbol: str, timeframe: str, bar_count: int) -> None:
+    def _start_fetch(
+        self,
+        mode: str,
+        symbol: str,
+        timeframe: str,
+        bar_count: int,
+        current_min_ts: Optional[int] = None,
+        current_max_ts: Optional[int] = None,
+        window_start_ms: Optional[int] = None,
+        window_end_ms: Optional[int] = None,
+    ) -> None:
         if self._worker and self._worker.isRunning():
             return
+        self._last_fetch_mode = mode
+        self._fetch_start_ms = int(time.time() * 1000)
         self._set_loading(True, f'Loading {symbol} {timeframe}...')
-        self._worker = DataFetchWorker(mode, self.store, self.exchange, symbol, timeframe, bar_count)
+        self._worker = DataFetchWorker(
+            mode,
+            self.store,
+            self.exchange,
+            symbol,
+            timeframe,
+            bar_count,
+            current_min_ts=current_min_ts,
+            current_max_ts=current_max_ts,
+            window_start_ms=window_start_ms,
+            window_end_ms=window_end_ms,
+        )
         self._worker.data_ready.connect(self._on_data_ready)
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._on_fetch_finished)
@@ -340,22 +427,44 @@ class ChartView(QWidget):
     def _on_data_ready(self, bars: list) -> None:
         if bars:
             try:
-                self.candles.set_historical_data(bars)
+                auto_range = self._last_fetch_mode not in ('backfill', 'window')
+                self._ignore_view_range = True
+                self.candles.set_historical_data(bars, auto_range=auto_range)
+                self._ignore_view_range = False
+                try:
+                    self._window_start_ms = int(bars[0][0])
+                    self._window_end_ms = int(bars[-1][0])
+                except Exception:
+                    pass
+                if self._last_fetch_mode in ('backfill', 'window') and self._pending_backfill_view:
+                    try:
+                        view_box = self.plot_widget.getViewBox()
+                        view_box.setXRange(self._pending_backfill_view[0], self._pending_backfill_view[1], padding=0)
+                    except Exception:
+                        pass
+                    self._pending_backfill_view = None
             except Exception as exc:
+                self._ignore_view_range = False
                 self._report_error(f'Chart render failed: {exc}')
+        self._refresh_history_end_status()
+        self._emit_debug_state()
         self._start_live_stream()
 
     def _on_error(self, message: str) -> None:
         self.status_label.setText(f'Error: {message}')
         self.status_label.setStyleSheet('color: #EF5350;')
         self._report_error(message)
+        self._emit_debug_state()
 
     def _on_fetch_finished(self) -> None:
         self._set_loading(False, '')
+        if self._fetch_start_ms is not None:
+            self._last_fetch_duration_ms = int(time.time() * 1000) - self._fetch_start_ms
+            self._fetch_start_ms = None
+        self._emit_debug_state()
 
     def _set_loading(self, is_loading: bool, message: str) -> None:
         self.load_button.setEnabled(not is_loading)
-        self.backfill_button.setEnabled(not is_loading)
         if is_loading:
             self.status_label.setText(message)
             self.status_label.setStyleSheet('color: #B2B5BE;')
@@ -409,18 +518,194 @@ class ChartView(QWidget):
                     self.store.store_bars(self.exchange, symbol, timeframe, [[ts, o, h, l, c, v]])
             except Exception as exc:
                 self._report_error(f'Cache update failed: {exc}')
+        self._emit_debug_state()
 
     def _on_trade(self, trade: dict) -> None:
         try:
             self.candles.update_live_trade(trade)
         except Exception as exc:
             self._report_error(f'Live trade update failed: {exc}')
+        self._emit_debug_state()
 
     def _set_timeframe(self, timeframe: str) -> None:
         if timeframe == self.current_timeframe:
+            if timeframe in self.timeframe_buttons:
+                self.timeframe_buttons[timeframe].setChecked(True)
             return
         if timeframe in self.timeframe_buttons:
             self.timeframe_buttons[self.current_timeframe].setChecked(False)
             self.timeframe_buttons[timeframe].setChecked(True)
         self.current_timeframe = timeframe
-        self._load_initial_data()
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
+        self._load_initial_data(use_cache_only=bool(cached_range))
+
+    def _on_view_range_changed(self) -> None:
+        if self._ignore_view_range:
+            return
+        if self._clamp_in_progress:
+            return
+        try:
+            view_box = self.plot_widget.getViewBox()
+            x_range, _ = view_box.viewRange()
+            x_min = x_range[0]
+            x_max = x_range[1]
+        except Exception:
+            return
+        tf_ms = self.candles.timeframe_ms or 60_000
+        span = x_max - x_min
+        span_bars = span / tf_ms if tf_ms > 0 else span
+        if span_bars > self._max_visible_bars:
+            center = (x_min + x_max) / 2.0
+            clamp_span = self._max_visible_bars * tf_ms
+            new_min = center - (clamp_span / 2.0)
+            new_max = center + (clamp_span / 2.0)
+            self._clamp_in_progress = True
+            try:
+                view_box.setXRange(new_min, new_max, padding=0)
+            finally:
+                self._clamp_in_progress = False
+            return
+        if self._backfill_pending or self._worker and self._worker.isRunning():
+            return
+        if self._current_loaded_range()[0] is None:
+            return
+        visible_span = max(1.0, x_max - x_min)
+        edge_threshold = max(5 * tf_ms, visible_span * 0.08)
+        current_min_ts, current_max_ts = self._current_loaded_range()
+        if current_min_ts is None or current_max_ts is None:
+            return
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.current_timeframe
+        oldest_ts, oldest_reached = self.store.get_history_limit(self.exchange, symbol, timeframe)
+        left_at_end = bool(oldest_reached and oldest_ts is not None and current_min_ts <= oldest_ts)
+        now_ms = int(time.time() * 1000)
+        right_at_end = (now_ms - current_max_ts) <= edge_threshold
+        left_near = (x_min - current_min_ts) <= edge_threshold
+        right_near = (current_max_ts - x_max) <= edge_threshold
+        if (left_near and not left_at_end) or (right_near and not right_at_end):
+            self._pending_backfill_view = (x_min, x_max)
+            self._backfill_pending = True
+            self._backfill_timer.start(200)
+        self._emit_debug_state()
+
+    def _trigger_window_load(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._backfill_pending = False
+            return
+        if not self._pending_backfill_view:
+            self._backfill_pending = False
+            return
+        x_min, x_max = self._pending_backfill_view
+        tf_ms = self.candles.timeframe_ms or 60_000
+        buffer_ms = int(self._window_buffer_bars * tf_ms)
+        desired_start = int(x_min - buffer_ms)
+        desired_end = int(x_max + buffer_ms)
+        desired_span = desired_end - desired_start
+        window_span = int(self._window_bars * tf_ms)
+        if desired_span < window_span:
+            center = (desired_start + desired_end) / 2.0
+            desired_start = int(center - (window_span / 2.0))
+            desired_end = int(center + (window_span / 2.0))
+        desired_start = max(0, desired_start)
+        if self._window_start_ms is not None and self._window_end_ms is not None:
+            if desired_start >= self._window_start_ms and desired_end <= self._window_end_ms:
+                self._backfill_pending = False
+                return
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.current_timeframe
+        self._start_fetch(
+            'window',
+            symbol,
+            timeframe,
+            0,
+            window_start_ms=desired_start,
+            window_end_ms=desired_end,
+        )
+        self._backfill_pending = False
+
+    def _current_loaded_range(self) -> tuple[Optional[int], Optional[int]]:
+        candles = getattr(self.candles, 'candles', [])
+        if not candles:
+            return None, None
+        try:
+            return int(candles[0][0]), int(candles[-1][0])
+        except Exception:
+            return None, None
+
+    def _refresh_history_end_status(self) -> None:
+        try:
+            symbol = self.symbol_box.currentText() or 'BTCUSDT'
+            timeframe = self.current_timeframe
+            oldest_ts, oldest_reached = self.store.get_history_limit(self.exchange, symbol, timeframe)
+            current_min_ts, _ = self._current_loaded_range()
+            reached = bool(oldest_reached and oldest_ts is not None and current_min_ts is not None and current_min_ts <= oldest_ts)
+            self.candles.set_history_end(reached)
+        except Exception:
+            pass
+
+    def _emit_debug_state(self) -> None:
+        if self.debug_sink is None:
+            return
+        now = time.time()
+        if now - self._debug_last_update < 0.5:
+            return
+        self._debug_last_update = now
+
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.current_timeframe
+        bars_loaded = len(getattr(self.candles, 'candles', []))
+        tf_ms = self.candles.timeframe_ms or 60_000
+        cache_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
+        oldest_ts, oldest_reached = self.store.get_history_limit(self.exchange, symbol, timeframe)
+
+        view_range = None
+        visible_bars = None
+        try:
+            view_box = self.plot_widget.getViewBox()
+            x_range, _ = view_box.viewRange()
+            view_range = x_range
+            span = x_range[1] - x_range[0]
+            visible_bars = span / tf_ms if tf_ms > 0 else None
+        except Exception:
+            pass
+
+        def fmt_ts(ts: Optional[int]) -> str:
+            if ts is None:
+                return 'n/a'
+            try:
+                return datetime.fromtimestamp(ts / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                return str(ts)
+
+        lines = [
+            f'Symbol: {symbol}',
+            f'Timeframe: {timeframe} ({int(tf_ms / 1000)}s)',
+            f'Bars loaded: {bars_loaded}',
+        ]
+        fps, last_render_ms = self.candles.get_render_stats()
+        lines.append(f'Render FPS: {fps:.1f}')
+        if last_render_ms:
+            lines.append(f'Last render: {fmt_ts(last_render_ms)}')
+        if view_range:
+            lines.append(f'View range: {int(view_range[0])} .. {int(view_range[1])}')
+        if visible_bars is not None:
+            lines.append(f'Visible bars: {visible_bars:.0f}')
+        if cache_range:
+            lines.append(f'Cache range: {fmt_ts(cache_range[0])} .. {fmt_ts(cache_range[1])}')
+        else:
+            lines.append('Cache range: n/a')
+        lines.append(f'Window range: {fmt_ts(self._window_start_ms)} .. {fmt_ts(self._window_end_ms)}')
+        lines.append(f'History end: {oldest_reached} (oldest {fmt_ts(oldest_ts)})')
+        lines.append(f'Fetch mode: {self._last_fetch_mode}')
+        if self._last_fetch_duration_ms is not None:
+            lines.append(f'Last fetch: {self._last_fetch_duration_ms} ms')
+        lines.append(f'Worker running: {bool(self._worker and self._worker.isRunning())}')
+        lines.append(f'Window pending: {self._backfill_pending}')
+        lines.append(f'Live kline: {bool(self._kline_worker and self._kline_worker.isRunning())}')
+        lines.append(f'Live trades: {bool(self._trade_worker and self._trade_worker.isRunning())}')
+
+        try:
+            self.debug_sink.set_metrics(lines)
+        except Exception:
+            pass

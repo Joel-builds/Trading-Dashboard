@@ -47,6 +47,18 @@ class DataStore:
             conn.execute(
                 'CREATE INDEX IF NOT EXISTS idx_symbols_exchange ON symbols (exchange)'
             )
+            conn.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS ohlcv_limits (
+                    exchange TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    oldest_ts INTEGER,
+                    oldest_reached INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (exchange, symbol, timeframe)
+                )
+                '''
+            )
 
     def get_cached_range(self, exchange: str, symbol: str, timeframe: str) -> Optional[Tuple[int, int]]:
         with self._connect() as conn:
@@ -131,4 +143,39 @@ class DataStore:
                 VALUES (?, ?, ?)
                 ''',
                 rows,
+            )
+
+    def get_history_limit(self, exchange: str, symbol: str, timeframe: str) -> Tuple[Optional[int], bool]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                '''
+                SELECT oldest_ts, oldest_reached
+                FROM ohlcv_limits
+                WHERE exchange=? AND symbol=? AND timeframe=?
+                ''',
+                (exchange, symbol, timeframe),
+            )
+            row = cur.fetchone()
+            if row:
+                oldest_ts = int(row[0]) if row[0] is not None else None
+                oldest_reached = bool(row[1])
+                return oldest_ts, oldest_reached
+        return None, False
+
+    def set_history_limit(
+        self,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        oldest_ts: Optional[int],
+        oldest_reached: bool,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                '''
+                INSERT OR REPLACE INTO ohlcv_limits
+                (exchange, symbol, timeframe, oldest_ts, oldest_reached)
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                (exchange, symbol, timeframe, oldest_ts, int(oldest_reached)),
             )

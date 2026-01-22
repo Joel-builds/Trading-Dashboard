@@ -35,3 +35,18 @@
 - Throttled trade stream updates to reduce drag lag.
 - Switched timeframe selector to button row.
 - Added searchable symbol dropdown.
+
+## 0.3
+- Made timeframe buttons exclusive to prevent unchecking.
+- Auto-load on symbol change.
+- Default symbol selection now prefers BTCUSDT on launch.
+- Renamed Load to Reset Cache for explicit refetch if there is a need.
+- Auto backfill triggers on left-edge pan and keeps the current view.
+- Backfill now loads a fixed-size chunk instead of the full cache.
+- Capped zoom-out to 1k visible bars with 2k.
+- Tracked end-of-history in cache and surfaced a chart label.
+- Switched to timestamp-based window loading so only the visible range is rendered.
+- Added a debug dock with live render, cache and performance metrics.
+- Added weekly and monthly timeframes.
+- Stop window loading once the earliest available history is reached.
+- Removed the manual Load More button in favor of windowed panning.

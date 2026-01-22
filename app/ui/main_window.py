@@ -4,6 +4,7 @@ from PyQt6.QtCore import Qt, QSettings
 from .chart_view import ChartView
 from .indicator_panel import IndicatorPanel
 from .error_dock import ErrorDock
+from .debug_dock import DebugDock
 
 
 class MainWindow(QMainWindow):
@@ -14,13 +15,16 @@ class MainWindow(QMainWindow):
 
         self.indicator_panel = IndicatorPanel()
         self.error_dock = ErrorDock()
-        self.chart_view = ChartView(error_sink=self.error_dock)
+        self.debug_dock = DebugDock()
+        self.chart_view = ChartView(error_sink=self.error_dock, debug_sink=self.debug_dock)
         self.setCentralWidget(self.chart_view)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.indicator_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.error_dock)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.debug_dock)
 
         self.tabifyDockWidget(self.indicator_panel, self.error_dock)
+        self.tabifyDockWidget(self.error_dock, self.debug_dock)
         self.setTabPosition(Qt.DockWidgetArea.RightDockWidgetArea, QTabWidget.TabPosition.East)
         self.indicator_panel.raise_()
 
