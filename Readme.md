@@ -1,8 +1,8 @@
-# Trading Dashboard (PyQt6 + pyqtgraph)
+# PySuperChart (PyQt6 + pyqtgraph)
 
 Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) charting, hot-reloadable indicators(TODO), and cached exchange data (SQLite).
 
-## Current Status
+## Current Status - V1 WIP
 - PyQt6 app scaffolded with dark theme and chart view.
 - Candlestick chart rendering wired with volume overlay and gridlines.
 - Binance OHLCV fetch + SQLite caching implemented.
