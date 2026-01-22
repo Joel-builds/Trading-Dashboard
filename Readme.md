@@ -1,6 +1,6 @@
 # Trading Dashboard (PyQt6 + pyqtgraph)
 
-Desktop charting app with TradingView-like dark theme, candlestick/Renko charting, hot-reloadable indicators, and cached exchange data (SQLite).
+Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) charting, hot-reloadable indicators(TODO), and cached exchange data (SQLite).
 
 ## Current Status
 - PyQt6 app scaffolded with dark theme and chart view.
