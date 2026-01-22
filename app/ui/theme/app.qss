@@ -50,6 +50,12 @@ QPushButton:hover {
     border: 1px solid #3A3F4C;
 }
 
+QPushButton:checked {
+    background-color: #0F141E;
+    border: 1px solid #2962FF;
+    color: #FFFFFF;
+}
+
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QListWidget {
     background-color: #0F141E;
     border: 1px solid #2A2E39;

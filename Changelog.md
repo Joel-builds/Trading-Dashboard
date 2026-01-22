@@ -30,3 +30,8 @@
 - Faster live ticks via trade stream updates.
 - Countdown label now refreshes every second.
 - UI layout persists across restarts.
+
+## 0.2.2
+- Throttled trade stream updates to reduce drag lag.
+- Switched timeframe selector to button row.
+- Added searchable symbol dropdown.

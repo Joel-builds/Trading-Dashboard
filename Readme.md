@@ -6,7 +6,7 @@ Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) c
 - PyQt6 app scaffolded with dark theme and chart view.
 - Candlestick chart rendering wired with volume overlay and gridlines.
 - Binance OHLCV fetch + SQLite caching implemented.
-- Symbol/timeframe selector UI with background fetching.
+- Symbol selector with searchable dropdown (wider) and highlighted timeframe buttons.
 - Live chart updates (WebSocket) and price marker on the right axis.
 - Startup cache forward-fill and backfill are in place.
 - Hover shows OHLC + change stats for any candle.

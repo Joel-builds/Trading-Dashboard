@@ -155,6 +155,7 @@ class CandlestickChart:
         self._countdown_timer = QTimer()
         self._countdown_timer.setInterval(1000)
         self._countdown_timer.timeout.connect(self._refresh_countdown)
+        self._last_trade_update_ms: int = 0
         self.hover_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
 
         self.plot_widget.setClipToView(True)
@@ -435,6 +436,11 @@ class CandlestickChart:
         last_ts = int(last[0])
         if ts_ms < last_ts or ts_ms >= last_ts + self.timeframe_ms:
             return
+
+        now_ms = int(datetime.now().timestamp() * 1000)
+        if now_ms - self._last_trade_update_ms < 100:
+            return
+        self._last_trade_update_ms = now_ms
 
         o, h, l, _, v = float(last[1]), float(last[2]), float(last[3]), float(last[4]), float(last[5])
         h = max(h, price)

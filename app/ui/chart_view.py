@@ -2,9 +2,9 @@ import os
 import time
 from typing import Optional, List
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter
 from PyQt6.QtGui import QFont
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt
 
 from core.data_store import DataStore
 from core.data_fetch import load_recent_bars, load_symbols, load_more_history
@@ -198,12 +198,22 @@ class ChartView(QWidget):
 
         toolbar_layout.addWidget(QLabel('Symbol'))
         self.symbol_box = QComboBox()
+        self.symbol_box.setEditable(True)
+        self.symbol_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.symbol_box.setMaxVisibleItems(20)
+        self.symbol_box.setMinimumWidth(240)
         toolbar_layout.addWidget(self.symbol_box)
 
         toolbar_layout.addWidget(QLabel('Timeframe'))
-        self.timeframe_box = QComboBox()
-        self.timeframe_box.addItems(['1m', '5m', '15m', '1h', '4h', '1d'])
-        toolbar_layout.addWidget(self.timeframe_box)
+        self.timeframe_buttons: dict[str, QPushButton] = {}
+        self.current_timeframe = '1m'
+        for tf in ['1m', '5m', '15m', '1h', '4h', '1d']:
+            button = QPushButton(tf)
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked, val=tf: self._set_timeframe(val))
+            self.timeframe_buttons[tf] = button
+            toolbar_layout.addWidget(button)
+        self.timeframe_buttons[self.current_timeframe].setChecked(True)
 
         self.load_button = QPushButton('Load')
         toolbar_layout.addWidget(self.load_button)
@@ -256,6 +266,7 @@ class ChartView(QWidget):
         self._symbol_worker: Optional[SymbolFetchWorker] = None
         self._kline_worker: Optional[LiveKlineWorker] = None
         self._trade_worker: Optional[LiveTradeWorker] = None
+        self._symbol_filter = None
 
     def _load_symbols(self) -> None:
         if self._symbol_worker and self._symbol_worker.isRunning():
@@ -272,6 +283,7 @@ class ChartView(QWidget):
             self.symbol_box.addItems(symbols)
             if 'BTCUSDT' in symbols:
                 self.symbol_box.setCurrentText('BTCUSDT')
+            self._setup_symbol_search()
         self._load_initial_data()
 
     def _on_symbol_error(self, message: str) -> None:
@@ -281,9 +293,26 @@ class ChartView(QWidget):
     def _on_symbol_fetch_finished(self) -> None:
         self._set_loading(False, '')
 
+    def _setup_symbol_search(self) -> None:
+        model = self.symbol_box.model()
+        if model is None:
+            return
+        proxy = QSortFilterProxyModel(self)
+        proxy.setSourceModel(model)
+        proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        proxy.setFilterKeyColumn(0)
+        self._symbol_filter = proxy
+
+        completer = QCompleter(proxy, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.symbol_box.setCompleter(completer)
+        self.symbol_box.lineEdit().textEdited.connect(proxy.setFilterFixedString)
+
     def _load_initial_data(self) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
-        timeframe = self.timeframe_box.currentText() or '1m'
+        timeframe = self.current_timeframe
         bar_count = 500
         self.candles.set_timeframe(timeframe)
         self._start_fetch('load', symbol, timeframe, bar_count)
@@ -293,7 +322,7 @@ class ChartView(QWidget):
 
     def _on_backfill_clicked(self) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
-        timeframe = self.timeframe_box.currentText() or '1m'
+        timeframe = self.current_timeframe
         bar_count = 2000
         self.candles.set_timeframe(timeframe)
         self._start_fetch('backfill', symbol, timeframe, bar_count)
@@ -343,7 +372,7 @@ class ChartView(QWidget):
 
     def _start_live_stream(self) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
-        timeframe = self.timeframe_box.currentText() or '1m'
+        timeframe = self.current_timeframe
         self.candles.set_timeframe(timeframe)
         if self._kline_worker is not None:
             self._kline_worker.stop()
@@ -376,7 +405,7 @@ class ChartView(QWidget):
                 v = float(kline.get('volume', 0))
                 if ts > 0 and o > 0 and h > 0 and l > 0 and c > 0:
                     symbol = self.symbol_box.currentText() or 'BTCUSDT'
-                    timeframe = self.timeframe_box.currentText() or '1m'
+                    timeframe = self.current_timeframe
                     self.store.store_bars(self.exchange, symbol, timeframe, [[ts, o, h, l, c, v]])
             except Exception as exc:
                 self._report_error(f'Cache update failed: {exc}')
@@ -386,3 +415,12 @@ class ChartView(QWidget):
             self.candles.update_live_trade(trade)
         except Exception as exc:
             self._report_error(f'Live trade update failed: {exc}')
+
+    def _set_timeframe(self, timeframe: str) -> None:
+        if timeframe == self.current_timeframe:
+            return
+        if timeframe in self.timeframe_buttons:
+            self.timeframe_buttons[self.current_timeframe].setChecked(False)
+            self.timeframe_buttons[timeframe].setChecked(True)
+        self.current_timeframe = timeframe
+        self._load_initial_data()
