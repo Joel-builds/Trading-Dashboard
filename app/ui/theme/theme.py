@@ -1,0 +1,10 @@
+# TradingView-like dark palette
+BACKGROUND = '#131722'
+PANEL = '#1E222D'
+GRID = '#2A2E39'
+TEXT = '#B2B5BE'
+TEXT_MUTED = '#6F737D'
+ACCENT = '#2962FF'
+UP = '#26A69A'
+DOWN = '#EF5350'
+VOLUME = '#4B5563'

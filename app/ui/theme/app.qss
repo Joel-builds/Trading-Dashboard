@@ -1,0 +1,39 @@
+QMainWindow {
+    background-color: #131722;
+}
+
+QDockWidget {
+    titlebar-close-icon: url(none);
+    titlebar-normal-icon: url(none);
+    color: #B2B5BE;
+    border: 1px solid #2A2E39;
+}
+
+QDockWidget::title {
+    text-align: left;
+    padding: 6px;
+    background-color: #1E222D;
+    border-bottom: 1px solid #2A2E39;
+}
+
+QWidget {
+    color: #B2B5BE;
+    background-color: #131722;
+}
+
+QPushButton {
+    background-color: #1E222D;
+    border: 1px solid #2A2E39;
+    padding: 6px 10px;
+}
+
+QPushButton:hover {
+    border: 1px solid #3A3F4C;
+}
+
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QListWidget {
+    background-color: #0F141E;
+    border: 1px solid #2A2E39;
+    selection-background-color: #2962FF;
+    selection-color: #FFFFFF;
+}
