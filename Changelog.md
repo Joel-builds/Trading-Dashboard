@@ -12,3 +12,15 @@
 - Added Binance retry-once for network failures.
 - Added `Readme.md` and `Changelog.md`.
 
+## 0.2.0
+- Added startup forward-fill for cached data.
+- Added live candle updates via Binance WebSocket.
+- Added sparse-cache window repair on startup fetch.
+- Added dotted live price line colored by candle direction.
+- Rendered candles without LOD downsampling to avoid gaps.
+- Persisted closed live candles to SQLite.
+- Added live price label with time-to-close.
+- Moved price scale to the right and widened it.
+- Synced time-to-close to Binance event time.
+- Candle hover OHLC stats.
+

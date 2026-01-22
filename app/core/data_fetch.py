@@ -16,8 +16,31 @@ def load_recent_bars(
     interval_ms = timeframe_to_ms(timeframe)
     start_ms = now_ms - (bar_count * interval_ms)
 
+    cached_range = store.get_cached_range(exchange, symbol, timeframe)
+    if cached_range is not None:
+        _, cached_max = cached_range
+        if cached_max < now_ms - interval_ms:
+            forward_bars = binance.fetch_ohlcv(symbol, timeframe, cached_max + interval_ms, now_ms)
+            store.store_bars(exchange, symbol, timeframe, forward_bars)
+
     cached = store.load_bars(exchange, symbol, timeframe, start_ms, now_ms)
     if cached:
+        expected_min = int(bar_count * 0.9)
+        has_gap = False
+        if len(cached) >= 2:
+            prev_ts = int(cached[0][0])
+            for row in cached[1:]:
+                ts = int(row[0])
+                if ts - prev_ts > interval_ms * 1.5:
+                    has_gap = True
+                    break
+                prev_ts = ts
+        if len(cached) >= expected_min and not has_gap:
+            return [list(row) for row in cached]
+        # If the cache is sparse or has gaps inside the requested window, refetch the full window.
+        refetch = binance.fetch_ohlcv(symbol, timeframe, start_ms, now_ms)
+        store.store_bars(exchange, symbol, timeframe, refetch)
+        cached = store.load_bars(exchange, symbol, timeframe, start_ms, now_ms)
         return [list(row) for row in cached]
 
     bars = binance.fetch_ohlcv(symbol, timeframe, start_ms, now_ms)

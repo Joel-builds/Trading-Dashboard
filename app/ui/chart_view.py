@@ -55,6 +55,84 @@ class SymbolFetchWorker(QThread):
             self.error.emit(str(exc))
 
 
+class LiveKlineWorker(QThread):
+    kline = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, symbol: str, timeframe: str) -> None:
+        super().__init__()
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self._stop = False
+        self._ws = None
+        self._time_offset_ms = 0
+
+    def stop(self) -> None:
+        self._stop = True
+        try:
+            if self._ws is not None:
+                self._ws.close()
+        except Exception:
+            pass
+
+    def run(self) -> None:
+        try:
+            import websocket
+            import json
+        except Exception as exc:
+            self.error.emit(f'WebSocket dependency missing: {exc}')
+            return
+
+        stream = f"{self.symbol.lower()}@kline_{self.timeframe}"
+        url = f"wss://stream.binance.com:9443/ws/{stream}"
+
+        def sync_time_offset():
+            try:
+                import requests
+                resp = requests.get('https://api.binance.com/api/v3/time', timeout=10)
+                resp.raise_for_status()
+                server_ms = int(resp.json().get('serverTime', 0))
+                local_ms = int(time.time() * 1000)
+                self._time_offset_ms = server_ms - local_ms
+            except Exception:
+                self._time_offset_ms = 0
+
+        sync_time_offset()
+
+        def on_message(ws, message):
+            if self._stop:
+                return
+            try:
+                payload = json.loads(message)
+                k = payload.get('k', {})
+                kline = {
+                    'ts_ms': int(k.get('t', 0)),
+                    'close_ms': int(k.get('T', 0)),
+                    'event_ms': int(payload.get('E', 0)),
+                    'open': float(k.get('o', 0)),
+                    'high': float(k.get('h', 0)),
+                    'low': float(k.get('l', 0)),
+                    'close': float(k.get('c', 0)),
+                    'volume': float(k.get('v', 0)),
+                    'closed': bool(k.get('x', False)),
+                    'time_offset_ms': self._time_offset_ms,
+                }
+                self.kline.emit(kline)
+            except Exception as exc:
+                self.error.emit(str(exc))
+
+        def on_error(ws, err):
+            if not self._stop:
+                self.error.emit(str(err))
+
+        def on_close(ws, code, msg):
+            _ = (code, msg)
+
+        self._ws = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close)
+        while not self._stop:
+            self._ws.run_forever(ping_interval=20, ping_timeout=10)
+
+
 class ChartView(QWidget):
     def __init__(self, error_sink=None) -> None:
         super().__init__()
@@ -124,6 +202,7 @@ class ChartView(QWidget):
         self.exchange = 'binance'
         self._worker: Optional[DataFetchWorker] = None
         self._symbol_worker: Optional[SymbolFetchWorker] = None
+        self._kline_worker: Optional[LiveKlineWorker] = None
 
     def _load_symbols(self) -> None:
         if self._symbol_worker and self._symbol_worker.isRunning():
@@ -153,6 +232,7 @@ class ChartView(QWidget):
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.timeframe_box.currentText() or '1m'
         bar_count = 500
+        self.candles.set_timeframe(timeframe)
         self._start_fetch('load', symbol, timeframe, bar_count)
 
     def _on_load_clicked(self) -> None:
@@ -162,6 +242,7 @@ class ChartView(QWidget):
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.timeframe_box.currentText() or '1m'
         bar_count = 2000
+        self.candles.set_timeframe(timeframe)
         self._start_fetch('backfill', symbol, timeframe, bar_count)
 
     def _start_fetch(self, mode: str, symbol: str, timeframe: str, bar_count: int) -> None:
@@ -180,6 +261,7 @@ class ChartView(QWidget):
                 self.candles.set_historical_data(bars)
             except Exception as exc:
                 self._report_error(f'Chart render failed: {exc}')
+        self._start_live_stream()
 
     def _on_error(self, message: str) -> None:
         self.status_label.setText(f'Error: {message}')
@@ -205,3 +287,36 @@ class ChartView(QWidget):
                 self.error_sink.append_error(message)
             except Exception:
                 pass
+
+    def _start_live_stream(self) -> None:
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.timeframe_box.currentText() or '1m'
+        self.candles.set_timeframe(timeframe)
+        if self._kline_worker is not None:
+            self._kline_worker.stop()
+            self._kline_worker = None
+        self._kline_worker = LiveKlineWorker(symbol, timeframe)
+        self._kline_worker.kline.connect(self._on_kline)
+        self._kline_worker.error.connect(lambda msg: self._report_error(f'Live stream error: {msg}'))
+        self._kline_worker.start()
+
+    def _on_kline(self, kline: dict) -> None:
+        try:
+            self.candles.update_live_kline(kline)
+        except Exception as exc:
+            self._report_error(f'Live candle update failed: {exc}')
+            return
+        if kline.get('closed'):
+            try:
+                ts = int(kline.get('ts_ms', 0))
+                o = float(kline.get('open', 0))
+                h = float(kline.get('high', 0))
+                l = float(kline.get('low', 0))
+                c = float(kline.get('close', 0))
+                v = float(kline.get('volume', 0))
+                if ts > 0 and o > 0 and h > 0 and l > 0 and c > 0:
+                    symbol = self.symbol_box.currentText() or 'BTCUSDT'
+                    timeframe = self.timeframe_box.currentText() or '1m'
+                    self.store.store_bars(self.exchange, symbol, timeframe, [[ts, o, h, l, c, v]])
+            except Exception as exc:
+                self._report_error(f'Cache update failed: {exc}')

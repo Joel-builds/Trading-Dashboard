@@ -4,20 +4,18 @@ Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) c
 
 ## Current Status
 - PyQt6 app scaffolded with dark theme and chart view.
-- Candlestick renderer wired and working (LOD + volume overlay + gridlines).
+- Candlestick chart rendering wired with volume overlay and gridlines.
 - Binance OHLCV fetch + SQLite caching implemented.
-- Symbol/timeframe selector UI wired with background fetching.
-- Incremental backfill (Load More) button implemented.
-- Fetch, symbol list, and render errors surface in the error dock.
-- Symbol list loading is non-blocking.
-- Binance requests retry once on network failure.
-- Volume bars use a green tone. - in the future make volume bars candle colored
+- Symbol/timeframe selector UI with background fetching.
+- Live chart updates (WebSocket) and price marker on the right axis.
+- Startup cache forward-fill and backfill are in place.
+- Hover shows OHLC + change stats for any candle.
 
 ## Quick Start
 1) Create/activate your Python environment
 2) Install dependencies:
 ```
-pip install PyQt6 pyqtgraph requests numpy
+pip install PyQt6 pyqtgraph requests numpy websocket-client
 ```
 3) Run:
 ```
@@ -35,10 +33,12 @@ python app/main.py
 - Symbol list is pulled from Binance and cached in SQLite (`app/data/ohlcv.sqlite`).
 - Load fetches recent bars for the selected symbol/timeframe, caches them, and renders.
 - Load More fetches older bars (backfill) and merges with cache.
+- On startup, cached data is extended forward to the present when needed.
+- Live kline updates stream in from Binance WebSocket.
+- Closed live candles are persisted to SQLite.
 
 ## Next Steps
 - Add indicator registry + hot-reload.
-- Chart interactions: mouse wheel zooms time scale; dragging on price axis adjusts price scale.
 
 ## SQLite Cache
 - Stored at `app/data/ohlcv.sqlite`.
