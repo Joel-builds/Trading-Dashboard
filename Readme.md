@@ -13,7 +13,7 @@ Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) c
 - Backfill loads fixed-size chunks so older history is incremental.
 - Hover shows OHLC + change stats for any candle.
 - Live updates now use both kline and trade streams for faster ticks.
-- Zoom-out is capped at 1k visible bars to keep rendering stable.
+- Zoom-out is capped at 1k visible bars to keep rendering stable with 2k buffer.
 - Cache tracks end-of-history and shows a chart label when reached.
 - Candles render on a timestamp axis with windowed loading around the visible range.
 - Window loading stops at the earliest available history once reached.
