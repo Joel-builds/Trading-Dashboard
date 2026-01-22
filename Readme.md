@@ -18,6 +18,9 @@ Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) c
 - Candles render on a timestamp axis with windowed loading around the visible range.
 - Window loading stops at the earliest available history once reached.
 - Debug dock shows live performance and window metrics.
+- Symbol tabs above the chart support quick switching, adding via "+", and persistence.
+- Each symbol tab stores its own timeframe.
+- Crosshair cursor with dashed X/Y guides follows the mouse.
 
 ## Quick Start
 1) Create/activate your Python environment

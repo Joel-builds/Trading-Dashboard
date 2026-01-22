@@ -33,6 +33,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_layout()
+        try:
+            self.chart_view.shutdown()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def _save_layout(self) -> None:

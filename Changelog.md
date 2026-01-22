@@ -36,7 +36,7 @@
 - Switched timeframe selector to button row.
 - Added searchable symbol dropdown.
 
-## 0.3
+## 0.3.0
 - Made timeframe buttons exclusive to prevent unchecking.
 - Auto-load on symbol change.
 - Default symbol selection now prefers BTCUSDT on launch.
@@ -50,3 +50,9 @@
 - Added weekly and monthly timeframes.
 - Stop window loading once the earliest available history is reached.
 - Removed the manual Load More button in favor of windowed panning.
+
+## 0.4.0
+- Added symbol tabs with a "+" tab and persistence.
+- Added per-tab timeframe persistence.
+- Periodic time offset resync for countdown accuracy.
+- Added chart crosshair cursor with dashed guides.

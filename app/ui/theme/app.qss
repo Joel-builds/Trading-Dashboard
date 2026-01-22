@@ -35,6 +35,25 @@ QTabBar::tab:selected {
     border: 1px solid #3A3F4C;
 }
 
+QTabBar::close-button {
+    image: url(app/ui/theme/close.svg);
+    background: transparent;
+    border: none;
+    padding: 0px;
+    width: 10px;
+    height: 10px;
+    margin-right: 6px;
+}
+
+QTabBar::close-button:hover {
+    background: transparent;
+    image: url(app/ui/theme/close_hover.svg);
+}
+
+QTabBar::close-button:pressed {
+    background: transparent;
+}
+
 QWidget {
     color: #B2B5BE;
     background-color: #131722;
@@ -43,7 +62,8 @@ QWidget {
 QPushButton {
     background-color: #1E222D;
     border: 1px solid #2A2E39;
-    padding: 6px 10px;
+    padding: 2px 8px;
+    min-height: 20px;
 }
 
 QPushButton:hover {
@@ -61,4 +81,123 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QListWidget {
     border: 1px solid #2A2E39;
     selection-background-color: #2962FF;
     selection-color: #FFFFFF;
+}
+
+QComboBox {
+    padding: 2px 8px;
+    min-height: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #0F141E;
+    border: 1px solid #2A2E39;
+    selection-background-color: #2962FF;
+    selection-color: #FFFFFF;
+}
+
+QComboBox QAbstractItemView::item {
+    padding: 4px 8px;
+}
+
+QComboBox QAbstractItemView QScrollBar:vertical {
+    background: #0F141E;
+    width: 8px;
+    margin: 2px 2px 2px 2px;
+}
+
+QComboBox QAbstractItemView QScrollBar::handle:vertical {
+    background: #2A2E39;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {
+    background: #3A3F4C;
+}
+
+QComboBox QAbstractItemView QScrollBar::add-line:vertical,
+QComboBox QAbstractItemView QScrollBar::sub-line:vertical {
+    height: 0px;
+    subcontrol-origin: margin;
+}
+
+QComboBox QAbstractItemView QScrollBar::add-page:vertical,
+QComboBox QAbstractItemView QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QCompleter QAbstractItemView {
+    background-color: #0F141E;
+    border: 1px solid #2A2E39;
+    selection-background-color: #2962FF;
+    selection-color: #FFFFFF;
+}
+
+QCompleter QAbstractItemView::item {
+    padding: 4px 8px;
+}
+
+QListView#SymbolCompleterPopup {
+    background-color: #0F141E;
+    border: 1px solid #2A2E39;
+    selection-background-color: #2962FF;
+    selection-color: #FFFFFF;
+}
+
+QListView#SymbolCompleterPopup::item {
+    padding: 4px 8px;
+}
+
+QCompleter QAbstractItemView QScrollBar:vertical {
+    background: #0F141E;
+    width: 8px;
+    margin: 2px 2px 2px 2px;
+}
+
+QCompleter QAbstractItemView QScrollBar::handle:vertical {
+    background: #2A2E39;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QCompleter QAbstractItemView QScrollBar::handle:vertical:hover {
+    background: #3A3F4C;
+}
+
+QCompleter QAbstractItemView QScrollBar::add-line:vertical,
+QCompleter QAbstractItemView QScrollBar::sub-line:vertical {
+    height: 0px;
+    subcontrol-origin: margin;
+}
+
+QCompleter QAbstractItemView QScrollBar::add-page:vertical,
+QCompleter QAbstractItemView QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QAbstractItemView QScrollBar:vertical {
+    background: #0F141E;
+    width: 8px;
+    margin: 2px 2px 2px 2px;
+}
+
+QAbstractItemView QScrollBar::handle:vertical {
+    background: #2A2E39;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QAbstractItemView QScrollBar::handle:vertical:hover {
+    background: #3A3F4C;
+}
+
+QAbstractItemView QScrollBar::add-line:vertical,
+QAbstractItemView QScrollBar::sub-line:vertical {
+    height: 0px;
+    subcontrol-origin: margin;
+}
+
+QAbstractItemView QScrollBar::add-page:vertical,
+QAbstractItemView QScrollBar::sub-page:vertical {
+    background: none;
 }

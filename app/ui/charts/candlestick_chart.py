@@ -196,6 +196,8 @@ class CandlestickChart:
         self._countdown_timer.timeout.connect(self._refresh_countdown)
         self._last_trade_update_ms: int = 0
         self.hover_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
+        self.crosshair_v: Optional[pg.InfiniteLine] = None
+        self.crosshair_h: Optional[pg.InfiniteLine] = None
         self.history_end_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
         self.history_end_reached = False
         self._ts_cache: List[float] = []
@@ -206,6 +208,10 @@ class CandlestickChart:
         self._last_render_ms = 0
 
         self.plot_widget.setClipToView(True)
+        try:
+            self.plot_widget.setCursor(Qt.CursorShape.CrossCursor)
+        except Exception:
+            pass
         try:
             view_box = self.plot_widget.getViewBox()
             if view_box:
@@ -611,10 +617,7 @@ class CandlestickChart:
         remaining = ''
         if self.last_close_ms is not None:
             close_ms = self.last_close_ms
-            if self.last_event_ms:
-                now_ms = self.last_event_ms
-            else:
-                now_ms = int(datetime.now().timestamp() * 1000) + self.time_offset_ms
+            now_ms = int(datetime.now().timestamp() * 1000) + self.time_offset_ms
             delta = max(0, close_ms - now_ms)
             total_sec = int(delta // 1000)
             hours = total_sec // 3600
@@ -701,6 +704,37 @@ class CandlestickChart:
             plot_item = self.plot_widget.getPlotItem()
             plot_item.scene().addItem(self.hover_label)
 
+    def _ensure_crosshair(self) -> None:
+        if self.crosshair_v is None:
+            self.crosshair_v = pg.InfiniteLine(
+                angle=90,
+                pen=pg.mkPen(QColor('#2A2E39'), style=Qt.PenStyle.DashLine),
+            )
+            self.crosshair_v.setZValue(55)
+            self.plot_widget.addItem(self.crosshair_v)
+        if self.crosshair_h is None:
+            self.crosshair_h = pg.InfiniteLine(
+                angle=0,
+                pen=pg.mkPen(QColor('#2A2E39'), style=Qt.PenStyle.DashLine),
+            )
+            self.crosshair_h.setZValue(55)
+            self.plot_widget.addItem(self.crosshair_h)
+
+    def _update_crosshair(self, x: float, y: float) -> None:
+        self._ensure_crosshair()
+        if self.crosshair_v is not None:
+            self.crosshair_v.setValue(x)
+            self.crosshair_v.show()
+        if self.crosshair_h is not None:
+            self.crosshair_h.setValue(y)
+            self.crosshair_h.show()
+
+    def _hide_crosshair(self) -> None:
+        if self.crosshair_v is not None:
+            self.crosshair_v.hide()
+        if self.crosshair_h is not None:
+            self.crosshair_h.hide()
+
     def _on_render(self) -> None:
         now = time.time()
         self._render_count += 1
@@ -736,9 +770,16 @@ class CandlestickChart:
         if not view_box:
             return
         try:
+            if not view_box.sceneBoundingRect().contains(scene_pos):
+                self._hide_crosshair()
+                return
+        except Exception:
+            pass
+        try:
             view_pos = view_box.mapSceneToView(scene_pos)
         except Exception:
             return
+        self._update_crosshair(view_pos.x(), view_pos.y())
         idx = self._index_for_time(view_pos.x())
         if idx is None or idx < 0 or idx >= len(self.candles):
             return

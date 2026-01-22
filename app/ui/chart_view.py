@@ -3,9 +3,9 @@ import time
 from datetime import datetime
 from typing import Optional, List
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter, QButtonGroup
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter, QButtonGroup, QTabBar
 from PyQt6.QtGui import QFont
-from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer
+from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer, QSettings
 
 from core.data_store import DataStore
 from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars
@@ -106,6 +106,7 @@ class LiveKlineWorker(QThread):
         self._stop = False
         self._ws = None
         self._time_offset_ms = 0
+        self._last_sync_ms = 0
 
     def stop(self) -> None:
         self._stop = True
@@ -134,6 +135,7 @@ class LiveKlineWorker(QThread):
                 server_ms = int(resp.json().get('serverTime', 0))
                 local_ms = int(time.time() * 1000)
                 self._time_offset_ms = server_ms - local_ms
+                self._last_sync_ms = local_ms
             except Exception:
                 self._time_offset_ms = 0
 
@@ -143,6 +145,9 @@ class LiveKlineWorker(QThread):
             if self._stop:
                 return
             try:
+                local_ms = int(time.time() * 1000)
+                if local_ms - self._last_sync_ms > 300_000:
+                    sync_time_offset()
                 payload = json.loads(message)
                 k = payload.get('k', {})
                 kline = {
@@ -267,6 +272,15 @@ class ChartView(QWidget):
 
         layout.addWidget(self.toolbar)
 
+        self.tab_bar = QTabBar()
+        self.tab_bar.setExpanding(False)
+        self.tab_bar.setMovable(True)
+        self.tab_bar.setTabsClosable(True)
+        self.tab_bar.currentChanged.connect(self._on_tab_changed)
+        self.tab_bar.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.tab_bar.tabMoved.connect(self._on_tab_moved)
+        layout.addWidget(self.tab_bar)
+
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground(theme.BACKGROUND)
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
@@ -285,6 +299,9 @@ class ChartView(QWidget):
         self.error_sink = error_sink
         self.debug_sink = debug_sink
         self._debug_last_update = 0.0
+        self._tab_syncing = False
+        self._skip_next_plus = False
+        self._settings = QSettings('TradingDashboard', 'TradingDashboard')
         self.symbol_box.currentIndexChanged.connect(self._on_symbol_changed)
 
     def _apply_axis_style(self) -> None:
@@ -342,13 +359,13 @@ class ChartView(QWidget):
             self.symbol_box.blockSignals(True)
             self.symbol_box.clear()
             self.symbol_box.addItems(symbols)
-            if 'BTCUSDT' in symbols:
-                idx = self.symbol_box.findText('BTCUSDT')
-                if idx >= 0:
-                    self.symbol_box.setCurrentIndex(idx)
             self.symbol_box.blockSignals(False)
             self._setup_symbol_search()
-        self._load_initial_data()
+        self._init_symbol_tabs()
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.current_timeframe
+        cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
+        self._load_initial_data(use_cache_only=bool(cached_range))
 
     def _on_symbol_error(self, message: str) -> None:
         self._report_error(f'Symbol list fetch failed: {message}')
@@ -371,6 +388,8 @@ class ChartView(QWidget):
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        popup = completer.popup()
+        popup.setObjectName('SymbolCompleterPopup')
         self.symbol_box.setCompleter(completer)
         self.symbol_box.lineEdit().textEdited.connect(proxy.setFilterFixedString)
 
@@ -387,9 +406,191 @@ class ChartView(QWidget):
 
     def _on_symbol_changed(self) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        self._update_active_tab_symbol(symbol)
         timeframe = self.current_timeframe
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
+
+    def _init_symbol_tabs(self) -> None:
+        saved = self._settings.value('symbolTabs')
+        if isinstance(saved, list):
+            entries = [str(s) for s in saved if s]
+        elif isinstance(saved, str) and saved:
+            entries = [s for s in saved.split(',') if s]
+        else:
+            entries = []
+        if not entries:
+            entries = ['BTCUSDT|1m']
+        active_index = self._settings.value('symbolTabIndex')
+        try:
+            active_index = int(active_index)
+        except Exception:
+            active_index = 0
+        active_index = max(0, min(active_index, len(entries) - 1))
+
+        self._tab_syncing = True
+        self.tab_bar.blockSignals(True)
+        self._clear_tab_bar()
+        for entry in entries:
+            symbol, tf = self._parse_tab_entry(entry)
+            idx = self.tab_bar.addTab(symbol)
+            self.tab_bar.setTabData(idx, tf)
+        plus_index = self.tab_bar.addTab('+')
+        self._ensure_plus_tab(plus_index)
+        for idx in range(self.tab_bar.count() - 1):
+            self.tab_bar.setTabEnabled(idx, True)
+        self.tab_bar.blockSignals(False)
+        self._tab_syncing = False
+
+        self._set_active_tab(active_index)
+
+    def _clear_tab_bar(self) -> None:
+        while self.tab_bar.count() > 0:
+            self.tab_bar.removeTab(0)
+
+    def _set_active_tab(self, index: int) -> None:
+        if self.tab_bar.count() == 0:
+            return
+        index = max(0, min(index, self.tab_bar.count() - 2))
+        self._tab_syncing = True
+        self.tab_bar.setCurrentIndex(index)
+        symbol = self.tab_bar.tabText(index)
+        self._set_symbol_from_tab(symbol)
+        tf = self._get_tab_timeframe(index)
+        if tf:
+            self._apply_timeframe_from_tab(tf)
+        self._tab_syncing = False
+
+    def _set_symbol_from_tab(self, symbol: str) -> None:
+        self.symbol_box.blockSignals(True)
+        idx = self.symbol_box.findText(symbol)
+        if idx >= 0:
+            self.symbol_box.setCurrentIndex(idx)
+        else:
+            self.symbol_box.setCurrentText(symbol)
+        self.symbol_box.blockSignals(False)
+
+    def _update_active_tab_symbol(self, symbol: str) -> None:
+        if self._tab_syncing:
+            return
+        idx = self.tab_bar.currentIndex()
+        if idx < 0 or idx >= self.tab_bar.count() - 1:
+            return
+        if self.tab_bar.tabText(idx) != symbol:
+            self.tab_bar.setTabText(idx, symbol)
+        self._persist_tabs()
+
+    def _persist_tabs(self) -> None:
+        entries = []
+        for i in range(self.tab_bar.count() - 1):
+            symbol = self.tab_bar.tabText(i)
+            tf = self._get_tab_timeframe(i) or self.current_timeframe
+            entries.append(f'{symbol}|{tf}')
+        self._settings.setValue('symbolTabs', entries)
+        self._settings.setValue('symbolTabIndex', self.tab_bar.currentIndex())
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self._tab_syncing:
+            return
+        if self._skip_next_plus:
+            self._skip_next_plus = False
+            return
+        if index == self.tab_bar.count() - 1 and self.tab_bar.tabText(index) == '+':
+            self._add_symbol_tab()
+            return
+        symbol = self.tab_bar.tabText(index)
+        tf = self._get_tab_timeframe(index) or self.current_timeframe
+        self._tab_syncing = True
+        self._apply_timeframe_from_tab(tf)
+        self._set_symbol_from_tab(symbol)
+        self._tab_syncing = False
+        self._persist_tabs()
+        self._on_symbol_changed()
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        if index < 0 or index >= self.tab_bar.count() - 1:
+            return
+        if self.tab_bar.count() <= 2:
+            return
+        self.tab_bar.removeTab(index)
+        if self.tab_bar.currentIndex() == self.tab_bar.count() - 1:
+            self.tab_bar.setCurrentIndex(max(0, self.tab_bar.count() - 2))
+        self._persist_tabs()
+
+    def _add_symbol_tab(self) -> None:
+        default_symbol = 'BTCUSDT'
+        insert_index = max(0, self.tab_bar.count() - 1)
+        self.tab_bar.insertTab(insert_index, default_symbol)
+        self.tab_bar.setTabData(insert_index, self.current_timeframe)
+        self.tab_bar.setCurrentIndex(insert_index)
+        self._set_symbol_from_tab(default_symbol)
+        self._ensure_plus_tab(self.tab_bar.count() - 1)
+        self._persist_tabs()
+
+    def _on_tab_moved(self, from_index: int, to_index: int) -> None:
+        plus_index = self.tab_bar.count() - 1
+        moved_plus = self.tab_bar.tabText(to_index) == '+'
+        if moved_plus or from_index == plus_index or to_index == plus_index:
+            if moved_plus:
+                symbol = self.tab_bar.tabText(to_index)
+                tf = self._get_tab_timeframe(to_index) or self.current_timeframe
+                prev_last = plus_index if plus_index != to_index else from_index
+                if prev_last >= 0 and prev_last < self.tab_bar.count():
+                    prev_symbol = self.tab_bar.tabText(prev_last)
+                    prev_tf = self._get_tab_timeframe(prev_last) or self.current_timeframe
+                    self.tab_bar.blockSignals(True)
+                    self.tab_bar.setTabText(to_index, prev_symbol)
+                    self.tab_bar.setTabData(to_index, prev_tf)
+                    self.tab_bar.setTabText(prev_last, '+')
+                    self.tab_bar.setTabData(prev_last, None)
+                    self.tab_bar.blockSignals(False)
+            if self.tab_bar.tabText(self.tab_bar.count() - 1) != '+':
+                plus_pos = None
+                for idx in range(self.tab_bar.count()):
+                    if self.tab_bar.tabText(idx) == '+':
+                        plus_pos = idx
+                        break
+                if plus_pos is not None:
+                    self.tab_bar.blockSignals(True)
+                    self.tab_bar.moveTab(plus_pos, self.tab_bar.count() - 1)
+                    self.tab_bar.blockSignals(False)
+            self._ensure_plus_tab(self.tab_bar.count() - 1)
+            self._skip_next_plus = True
+        self._persist_tabs()
+
+    def _ensure_plus_tab(self, index: int) -> None:
+        if index < 0 or index >= self.tab_bar.count():
+            return
+        self.tab_bar.setTabText(index, '+')
+        self.tab_bar.setTabData(index, None)
+        self.tab_bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
+
+    def _parse_tab_entry(self, entry: str) -> tuple[str, str]:
+        if '|' not in entry:
+            return entry, self.current_timeframe
+        symbol, tf = entry.split('|', 1)
+        symbol = symbol.strip() or 'BTCUSDT'
+        tf = tf.strip() or self.current_timeframe
+        return symbol, tf
+
+    def _get_tab_timeframe(self, index: int) -> Optional[str]:
+        try:
+            tf = self.tab_bar.tabData(index)
+            if isinstance(tf, str) and tf:
+                return tf
+        except Exception:
+            pass
+        return None
+
+    def _apply_timeframe_from_tab(self, timeframe: str) -> None:
+        if timeframe == self.current_timeframe:
+            if timeframe in self.timeframe_buttons:
+                self.timeframe_buttons[timeframe].setChecked(True)
+            return
+        if timeframe in self.timeframe_buttons:
+            self.timeframe_buttons[self.current_timeframe].setChecked(False)
+            self.timeframe_buttons[timeframe].setChecked(True)
+        self.current_timeframe = timeframe
 
     def _start_fetch(
         self,
@@ -498,6 +699,22 @@ class ChartView(QWidget):
         self._trade_worker.error.connect(lambda msg: self._report_error(f'Trade stream error: {msg}'))
         self._trade_worker.start()
 
+    def shutdown(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(1500)
+        if self._symbol_worker and self._symbol_worker.isRunning():
+            self._symbol_worker.quit()
+            self._symbol_worker.wait(1500)
+        if self._kline_worker is not None:
+            self._kline_worker.stop()
+            self._kline_worker.wait(1500)
+            self._kline_worker = None
+        if self._trade_worker is not None:
+            self._trade_worker.stop()
+            self._trade_worker.wait(1500)
+            self._trade_worker = None
+
     def _on_kline(self, kline: dict) -> None:
         try:
             self.candles.update_live_kline(kline)
@@ -536,6 +753,10 @@ class ChartView(QWidget):
             self.timeframe_buttons[self.current_timeframe].setChecked(False)
             self.timeframe_buttons[timeframe].setChecked(True)
         self.current_timeframe = timeframe
+        idx = self.tab_bar.currentIndex()
+        if idx >= 0 and idx < self.tab_bar.count() - 1:
+            self.tab_bar.setTabData(idx, timeframe)
+            self._persist_tabs()
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
