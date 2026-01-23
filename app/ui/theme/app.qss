@@ -2,6 +2,57 @@ QMainWindow {
     background-color: #131722;
 }
 
+QWidget#TitleBar {
+    background-color: #1E222D;
+    border-bottom: 1px solid #2A2E39;
+}
+
+#TitleBarTitle {
+    color: #FFFFFF;
+    font-weight: bold;
+}
+
+QMenuBar#TitleBarMenu {
+    background-color: #1E222D;
+    color: #B2B5BE;
+    border: none;
+}
+
+QMenuBar#TitleBarMenu::item {
+    background: transparent;
+    padding: 4px 10px;
+}
+
+QMenuBar#TitleBarMenu::item:selected {
+    background: #0F141E;
+    color: #FFFFFF;
+}
+
+#TitleButton {
+    background-color: transparent;
+    border: none;
+    min-height: 20px;
+    min-width: 24px;
+    padding: 0px;
+}
+
+#TitleButton:hover {
+    background-color: #2A2E39;
+}
+
+#TitleButtonClose {
+    background-color: transparent;
+    border: none;
+    min-height: 20px;
+    min-width: 24px;
+    padding: 0px;
+}
+
+#TitleButtonClose:hover {
+    background-color: #EF5350;
+    color: #FFFFFF;
+}
+
 QMenuBar {
     background-color: #1E222D;
     color: #B2B5BE;

@@ -61,3 +61,7 @@
 - Added a Window menu to re-open hidden docks.
 - Added a Settings menu with a placeholder dialog.
 - Added a Themes submenu with a placeholder dialog.
+
+## 0.5.0
+- Renamed app to PySuperChart.
+- Added a custom title bar and app icon.

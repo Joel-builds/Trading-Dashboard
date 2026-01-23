@@ -24,6 +24,7 @@ Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) c
 - Window menu lets you re-open hidden docks.
 - Settings dialog stub added under the Settings menu.
 - Theme editor stub added under Settings → Themes.
+- Custom title bar and app icon set for PySuperChart.
 
 ## Quick Start
 1) Create/activate your Python environment
