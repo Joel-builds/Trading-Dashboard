@@ -69,3 +69,25 @@
 - Increased mouse wheel zoom sensitivity.
 - Left-drag on the price scale adjusts the y-axis.
 - Enabled pyqtgraph grid by default with denser major price ticks.
+- Polished chart visuals (grid contrast, crosshair, cursor price label, volume styling).
+- Fixed volume histogram rendering when using per-bar colors.
+- Added OHLC hover band and PNG export.
+- Tweaked UI polish (toolbar alignment, tab underline, softer session lines, volume baseline).
+- Refined OHLC row positioning, crosshair softness, and price label notch.
+- Added cursor time label on the time axis.
+- Cursor snapping only within candle range; time pill centered in bottom axis.
+- Hid axis border lines on the right and bottom scales.
+- Fixed axis style crash on older pyqtgraph versions.
+- Removed PlotWidget top border styling.
+- Added a subtle tab bar divider.
+- Applied global scrollbar styling.
+- Added tab hover tint styling.
+- Added comma + precision formatting for current and cursor price labels.
+- Raised cursor price label z-order above live price label.
+- Volume bars pinned to the chart bottom again.
+- Toolbar labels removed (self-explanatory controls).
+- Added adaptive candle widths with thinner wicks at dense zoom.
+- Added OHLC hover pill, candle outline, and cursor intersection dot.
+- Added cursor time tick on the time axis and smaller axis tick fonts.
+- Added dock tab icons and tightened toolbar spacing.
+- Fixed volume bars disappearing when zooming out.

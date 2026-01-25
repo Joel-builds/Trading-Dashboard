@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtWidgets import QMainWindow, QDockWidget, QTabWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget, QMenuBar
+from PyQt6.QtWidgets import QMainWindow, QDockWidget, QTabWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget, QMenuBar, QFileDialog, QStyle
 from PyQt6.QtGui import QAction, QPixmap
 from PyQt6.QtCore import Qt, QSettings, QPoint, QRect
 
@@ -112,10 +112,20 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self.error_dock, self.debug_dock)
         self.setTabPosition(Qt.DockWidgetArea.RightDockWidgetArea, QTabWidget.TabPosition.East)
         self.indicator_panel.raise_()
+        self._set_dock_icons()
 
         self._settings = QSettings('PySuperChart', 'PySuperChart')
         self._setup_menu()
         self._restore_layout()
+
+    def _set_dock_icons(self) -> None:
+        try:
+            style = self.style()
+            self.indicator_panel.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+            self.error_dock.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_MessageBoxCritical))
+            self.debug_dock.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+        except Exception:
+            pass
 
     def closeEvent(self, event) -> None:
         self._save_layout()
@@ -203,8 +213,13 @@ class MainWindow(QMainWindow):
         self.setGeometry(geo)
 
     def _setup_menu(self) -> None:
+        file_menu = self._menu_bar.addMenu('File')
         window_menu = self._menu_bar.addMenu('Window')
         settings_menu = self._menu_bar.addMenu('Settings')
+
+        export_action = QAction('Export Chart as PNG...', self)
+        export_action.triggered.connect(self._export_chart_png)
+        file_menu.addAction(export_action)
 
         self._dock_actions = []
         for dock in (self.indicator_panel, self.error_dock, self.debug_dock):
@@ -273,6 +288,23 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
 
         dialog.exec()
+
+    def _export_chart_png(self) -> None:
+        default_path = os.path.join(os.path.expanduser('~'), 'pysuperchart.png')
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            'Export Chart as PNG',
+            default_path,
+            'PNG Image (*.png)',
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.png'):
+            path = f'{path}.png'
+        try:
+            self.chart_view.export_chart_png(path)
+        except Exception:
+            pass
 
     def _save_layout(self) -> None:
         self._settings.setValue('geometry', self.saveGeometry())

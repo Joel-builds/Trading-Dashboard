@@ -3,9 +3,9 @@ import time
 from datetime import datetime
 from typing import Optional, List
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter, QButtonGroup, QTabBar
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer, QSettings
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter, QButtonGroup, QTabBar, QStyle, QLineEdit, QMenu
+from PyQt6.QtGui import QFont, QColor, QLinearGradient, QBrush, QIcon
+from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer, QSettings, QSize
 
 from core.data_store import DataStore
 from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars
@@ -252,19 +252,19 @@ class ChartView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.toolbar = QWidget()
+        self.toolbar.setObjectName('TopToolbar')
         toolbar_layout = QHBoxLayout(self.toolbar)
-        toolbar_layout.setContentsMargins(8, 8, 8, 4)
-        toolbar_layout.setSpacing(8)
+        toolbar_layout.setContentsMargins(6, 6, 6, 4)
+        toolbar_layout.setSpacing(6)
 
-        toolbar_layout.addWidget(QLabel('Symbol'))
         self.symbol_box = QComboBox()
         self.symbol_box.setEditable(True)
         self.symbol_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.symbol_box.setMaxVisibleItems(20)
         self.symbol_box.setMinimumWidth(240)
+        self.symbol_box.setMinimumHeight(22)
         toolbar_layout.addWidget(self.symbol_box)
 
-        toolbar_layout.addWidget(QLabel('Timeframe'))
         self.timeframe_buttons: dict[str, QPushButton] = {}
         self.timeframe_group = QButtonGroup(self)
         self.timeframe_group.setExclusive(True)
@@ -272,6 +272,7 @@ class ChartView(QWidget):
         for tf in ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1M']:
             button = QPushButton(tf)
             button.setCheckable(True)
+            button.setMinimumHeight(22)
             button.clicked.connect(lambda _checked, val=tf: self._set_timeframe(val))
             self.timeframe_buttons[tf] = button
             self.timeframe_group.addButton(button)
@@ -279,6 +280,19 @@ class ChartView(QWidget):
         self.timeframe_buttons[self.current_timeframe].setChecked(True)
 
         self.load_button = QPushButton('Reset Cache')
+        self.load_button.setToolTip('Reset Cache')
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), 'theme', 'icon_refresh.svg')
+            icon = QIcon(icon_path)
+            if icon.isNull():
+                icon = self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+            self.load_button.setIcon(icon)
+            self.load_button.setIconSize(QSize(14, 14))
+            self.load_button.setText('')
+            self.load_button.setFixedSize(28, 28)
+            self.load_button.setStyleSheet('padding: 0px;')
+        except Exception:
+            pass
         toolbar_layout.addWidget(self.load_button)
 
         self.status_label = QLabel('')
@@ -288,19 +302,38 @@ class ChartView(QWidget):
         layout.addWidget(self.toolbar)
 
         self.tab_bar = QTabBar()
+        self.tab_bar.setObjectName('SymbolTabs')
         self.tab_bar.setExpanding(False)
         self.tab_bar.setMovable(True)
         self.tab_bar.setTabsClosable(True)
+        self.tab_bar.setDrawBase(False)
+        self.tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tab_bar.currentChanged.connect(self._on_tab_changed)
         self.tab_bar.tabCloseRequested.connect(self._on_tab_close_requested)
         self.tab_bar.tabMoved.connect(self._on_tab_moved)
+        self.tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
         layout.addWidget(self.tab_bar)
 
         view_box = TimeScaleViewBox()
         self.plot_widget = pg.PlotWidget(viewBox=view_box)
-        self.plot_widget.setBackground(theme.BACKGROUND)
+        gradient = QLinearGradient(0, 0, 0, 1)
+        gradient.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectBoundingMode)
+        gradient.setColorAt(0.0, QColor('#141A26'))
+        gradient.setColorAt(1.0, QColor('#101520'))
+        self.plot_widget.setBackground(QBrush(gradient))
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self.plot_widget.setClipToView(True)
+        self.plot_widget.setStyleSheet("border: 0px;")
+        try:
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.setBorder(None)
+            plot_item.getViewBox().setBorder(None)
+        except Exception:
+            pass
+        try:
+            self.plot_widget.getPlotItem().ctrl.gridAlphaSlider.setValue(20)
+        except Exception:
+            pass
 
         self._apply_axis_style()
         self._ensure_grid_visible()
@@ -320,6 +353,22 @@ class ChartView(QWidget):
         self._skip_next_plus = False
         self._settings = QSettings('TradingDashboard', 'TradingDashboard')
         self.symbol_box.currentIndexChanged.connect(self._on_symbol_changed)
+        self._add_symbol_search_icon()
+
+    def _add_symbol_search_icon(self) -> None:
+        line_edit = self.symbol_box.lineEdit()
+        if line_edit is None:
+            return
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), 'theme', 'icon_search.svg')
+            icon = QIcon(icon_path)
+            if icon.isNull():
+                icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
+            action = line_edit.addAction(icon, QLineEdit.ActionPosition.LeadingPosition)
+            action.setIcon(icon)
+            line_edit.setTextMargins(0, 0, 4, 0)
+        except Exception:
+            pass
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -328,10 +377,12 @@ class ChartView(QWidget):
     def _ensure_grid_visible(self) -> None:
         try:
             self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
-            for axis_name in ('left', 'right', 'bottom'):
-                axis = self.plot_widget.getAxis(axis_name)
-                if axis:
-                    axis.setGrid(0.2)
+            axis_bottom = self.plot_widget.getAxis('bottom')
+            axis_right = self.plot_widget.getAxis('right')
+            if axis_bottom:
+                axis_bottom.setGrid(0.12)
+            if axis_right:
+                axis_right.setGrid(0.28)
         except Exception:
             pass
 
@@ -339,11 +390,16 @@ class ChartView(QWidget):
         axis_pen = pg.mkPen(theme.GRID)
         text_pen = pg.mkPen(theme.TEXT)
         font = QFont()
-        font.setPointSize(9)
+        font.setPointSize(8)
 
-        for axis_name in ('left', 'bottom'):
+        for axis_name in ('left', 'bottom', 'right'):
             axis = self.plot_widget.getAxis(axis_name)
             axis.setPen(axis_pen)
+            try:
+                axis.setTickPen(axis_pen)
+                axis.setStyle(tickPen=axis_pen)
+            except Exception:
+                pass
             axis.setTextPen(text_pen)
             axis.setTickFont(font)
 
@@ -395,6 +451,7 @@ class ChartView(QWidget):
         self._init_symbol_tabs()
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.current_timeframe
+        self._update_chart_header(symbol, timeframe)
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
 
@@ -439,6 +496,7 @@ class ChartView(QWidget):
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         self._update_active_tab_symbol(symbol)
         timeframe = self.current_timeframe
+        self._update_chart_header(symbol, timeframe)
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
 
@@ -546,6 +604,36 @@ class ChartView(QWidget):
         self.tab_bar.removeTab(index)
         if self.tab_bar.currentIndex() == self.tab_bar.count() - 1:
             self.tab_bar.setCurrentIndex(max(0, self.tab_bar.count() - 2))
+        self._persist_tabs()
+
+    def _on_tab_context_menu(self, pos) -> None:
+        index = self.tab_bar.tabAt(pos)
+        if index < 0 or index >= self.tab_bar.count() - 1:
+            return
+        menu = QMenu(self)
+        close_action = menu.addAction('Close')
+        close_others = menu.addAction('Close Others')
+        close_all = menu.addAction('Close All')
+        action = menu.exec(self.tab_bar.mapToGlobal(pos))
+        if action == close_action:
+            self._on_tab_close_requested(index)
+        elif action == close_others:
+            self._close_other_tabs(index)
+        elif action == close_all:
+            self._close_all_tabs()
+
+    def _close_other_tabs(self, keep_index: int) -> None:
+        for idx in range(self.tab_bar.count() - 2, -1, -1):
+            if idx == keep_index:
+                continue
+            self.tab_bar.removeTab(idx)
+        self.tab_bar.setCurrentIndex(min(keep_index, self.tab_bar.count() - 2))
+        self._persist_tabs()
+
+    def _close_all_tabs(self) -> None:
+        while self.tab_bar.count() > 1:
+            self.tab_bar.removeTab(0)
+        self.tab_bar.setCurrentIndex(0)
         self._persist_tabs()
 
     def _add_symbol_tab(self) -> None:
@@ -746,6 +834,10 @@ class ChartView(QWidget):
             self._trade_worker.wait(1500)
             self._trade_worker = None
 
+    def export_chart_png(self, path: str) -> None:
+        pixmap = self.plot_widget.grab()
+        pixmap.save(path, 'PNG')
+
     def _on_kline(self, kline: dict) -> None:
         try:
             self.candles.update_live_kline(kline)
@@ -789,8 +881,15 @@ class ChartView(QWidget):
             self.tab_bar.setTabData(idx, timeframe)
             self._persist_tabs()
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        self._update_chart_header(symbol, timeframe)
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
+
+    def _update_chart_header(self, symbol: str, timeframe: str) -> None:
+        try:
+            self.candles.set_header(f'{symbol} {timeframe}')
+        except Exception:
+            pass
 
     def _on_view_range_changed(self) -> None:
         if self._ignore_view_range:

@@ -1,24 +1,34 @@
 from bisect import bisect_left, bisect_right
 import pyqtgraph as pg
 from PyQt6.QtGui import QColor
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 from .performance import calculate_lod_step, MAX_VISIBLE_BARS_DENSE
 
 
 def update_volume_histogram(
     plot_widget: pg.PlotWidget,
-    volume_item: Optional[pg.BarGraphItem],
+    volume_item: Optional[Union[pg.BarGraphItem, Tuple[pg.BarGraphItem, pg.BarGraphItem]]],
     base_color: QColor,
     data: List[Iterable],
     extract_volume: Callable[[Any, int], float],
     extract_x: Callable[[Any, int], float],
+    extract_is_up: Optional[Callable[[Any, int], Optional[bool]]] = None,
+    up_color: Optional[QColor] = None,
+    down_color: Optional[QColor] = None,
     volume_height_ratio: float = 0.15,
     bar_width: float = 0.8,
     flush_bottom: bool = True,
-) -> Tuple[Optional[pg.BarGraphItem], float]:
+) -> Tuple[Optional[Union[pg.BarGraphItem, Tuple[pg.BarGraphItem, pg.BarGraphItem]]], float]:
     if not data:
-        if volume_item:
+        if isinstance(volume_item, tuple):
+            for item in volume_item:
+                try:
+                    plot_widget.removeItem(item)
+                except Exception:
+                    pass
+            volume_item = None
+        elif volume_item:
             plot_widget.removeItem(volume_item)
             volume_item = None
         return None, 0.0
@@ -46,12 +56,15 @@ def update_volume_histogram(
 
     volumes = []
     x_positions = []
+    directions = []
     for idx in range(start_idx, end_idx, step):
         item = data[idx]
         vol = extract_volume(item, idx)
         x_pos = extract_x(item, idx)
         volumes.append(vol)
         x_positions.append(x_pos)
+        if extract_is_up is not None:
+            directions.append(extract_is_up(item, idx))
 
     if not volumes:
         return volume_item, 0.0
@@ -93,28 +106,88 @@ def update_volume_histogram(
 
     scaled_heights = [(v / volume_max) * volume_max_height for v in volumes]
     volume_y_positions = [volume_bottom for _ in volumes]
-    volume_color = QColor(base_color)
-    volume_color.setAlpha(120)
-    if volume_item is None:
-        volume_item = pg.BarGraphItem(
-            x=x_positions,
-            height=scaled_heights,
-            y0=volume_y_positions,
-            width=bar_width,
-            brush=volume_color,
-            pen=pg.mkPen(base_color, width=1),
-        )
-        volume_item.setZValue(10)
-        plot_widget.addItem(volume_item)
+    transparent_pen = pg.mkPen(QColor(0, 0, 0, 0), width=0)
+    if extract_is_up is not None and directions:
+        up_x = []
+        up_h = []
+        up_y0 = []
+        down_x = []
+        down_h = []
+        down_y0 = []
+        for x_pos, height, y0, is_up in zip(x_positions, scaled_heights, volume_y_positions, directions):
+            if is_up is None:
+                is_up = True
+            if is_up:
+                up_x.append(x_pos)
+                up_h.append(height)
+                up_y0.append(y0)
+            else:
+                down_x.append(x_pos)
+                down_h.append(height)
+                down_y0.append(y0)
+
+        up_color = QColor(up_color) if up_color is not None else QColor('#22C55E')
+        down_color = QColor(down_color) if down_color is not None else QColor('#EF5350')
+        up_color.setAlpha(100)
+        down_color.setAlpha(100)
+
+        if volume_item is None or not isinstance(volume_item, tuple):
+            up_item = pg.BarGraphItem(
+                x=up_x,
+                height=up_h,
+                y0=up_y0,
+                width=bar_width,
+                brush=up_color,
+                pen=transparent_pen,
+            )
+            down_item = pg.BarGraphItem(
+                x=down_x,
+                height=down_h,
+                y0=down_y0,
+                width=bar_width,
+                brush=down_color,
+                pen=transparent_pen,
+            )
+            up_item.setZValue(10)
+            down_item.setZValue(10)
+            plot_widget.addItem(up_item)
+            plot_widget.addItem(down_item)
+            volume_item = (up_item, down_item)
+        else:
+            up_item, down_item = volume_item
+            up_item.setOpts(x=up_x, height=up_h, y0=up_y0, width=bar_width, brush=up_color, pen=transparent_pen)
+            down_item.setOpts(x=down_x, height=down_h, y0=down_y0, width=bar_width, brush=down_color, pen=transparent_pen)
+            up_item.update()
+            down_item.update()
     else:
-        volume_item.setOpts(
-            x=x_positions,
-            height=scaled_heights,
-            y0=volume_y_positions,
-            width=bar_width,
-            brush=volume_color,
-            pen=pg.mkPen(base_color, width=1),
-        )
-        volume_item.update()
+        volume_color = QColor(base_color)
+        volume_color.setAlpha(100)
+        if volume_item is None or isinstance(volume_item, tuple):
+            if isinstance(volume_item, tuple):
+                for item in volume_item:
+                    try:
+                        plot_widget.removeItem(item)
+                    except Exception:
+                        pass
+            volume_item = pg.BarGraphItem(
+                x=x_positions,
+                height=scaled_heights,
+                y0=volume_y_positions,
+                width=bar_width,
+                brush=volume_color,
+                pen=transparent_pen,
+            )
+            volume_item.setZValue(10)
+            plot_widget.addItem(volume_item)
+        else:
+            volume_item.setOpts(
+                x=x_positions,
+                height=scaled_heights,
+                y0=volume_y_positions,
+                width=bar_width,
+                brush=volume_color,
+                pen=transparent_pen,
+            )
+            volume_item.update()
 
     return volume_item, volume_max

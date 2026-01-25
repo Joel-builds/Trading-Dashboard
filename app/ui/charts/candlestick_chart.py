@@ -6,7 +6,7 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer
+from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer, QLineF
 from PyQt6.QtGui import QFont, QPainter, QPicture, QColor, QPainterPath
 
 from .volume_histogram import update_volume_histogram
@@ -64,6 +64,8 @@ class CandlestickItem(pg.GraphicsObject):
                 else:
                     start_idx, end_idx = 0, len(self.data)
                 step = 1
+                visible_count = max(0, end_idx - start_idx)
+                wick_width = 0 if visible_count > 700 else 1
                 y_min = float('inf')
                 y_max = float('-inf')
                 x_min = float('inf')
@@ -106,10 +108,13 @@ class CandlestickItem(pg.GraphicsObject):
                     else:
                         current_color = self.down_color if is_bear else self.base_color
 
-                    painter.setPen(pg.mkPen(current_color))
+                    wick_pen = pg.mkPen(current_color, width=wick_width)
+                    body_pen = pg.mkPen(current_color, width=1)
                     painter.setBrush(pg.mkBrush(current_color))
                     if high != low:
+                        painter.setPen(wick_pen)
                         painter.drawLine(QPointF(x_val, low), QPointF(x_val, high))
+                    painter.setPen(body_pen)
                     body_top = max(open_price, close)
                     body_bottom = min(open_price, close)
                     body_height = body_top - body_bottom
@@ -181,11 +186,21 @@ class CandlestickChart:
         self.down_color = QColor(down_color)
         self.candles: List[List[float]] = []
         self.bar_colors: List[Optional[QColor]] = []
-        self.volume_item: Optional[pg.BarGraphItem] = None
+        self.volume_item: Optional[object] = None
         self.volume_max: float = 0.0
         self.price_line: Optional[pg.InfiniteLine] = None
         self.price_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
         self.price_label_bg: Optional[pg.QtWidgets.QGraphicsPathItem] = None
+        self.cursor_price_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
+        self.cursor_price_label_bg: Optional[pg.QtWidgets.QGraphicsPathItem] = None
+        self.cursor_time_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
+        self.cursor_time_label_bg: Optional[pg.QtWidgets.QGraphicsPathItem] = None
+        self.header_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
+        self.hover_band: Optional[pg.QtWidgets.QGraphicsRectItem] = None
+        self.price_tick: Optional[pg.QtWidgets.QGraphicsLineItem] = None
+        self.session_lines: List[pg.InfiniteLine] = []
+        self.volume_baseline: Optional[pg.InfiniteLine] = None
+        self._hover_index: Optional[int] = None
         self.timeframe_ms: Optional[int] = None
         self.last_kline_ts_ms: Optional[int] = None
         self.last_close_ms: Optional[int] = None
@@ -196,9 +211,14 @@ class CandlestickChart:
         self._countdown_timer.timeout.connect(self._refresh_countdown)
         self._last_trade_update_ms: int = 0
         self.hover_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
+        self.hover_label_bg: Optional[pg.QtWidgets.QGraphicsPathItem] = None
+        self.hover_outline: Optional[pg.QtWidgets.QGraphicsRectItem] = None
         self.crosshair_v: Optional[pg.InfiniteLine] = None
         self.crosshair_h: Optional[pg.InfiniteLine] = None
+        self.cursor_dot: Optional[pg.QtWidgets.QGraphicsEllipseItem] = None
+        self.cursor_time_tick: Optional[pg.QtWidgets.QGraphicsLineItem] = None
         self.history_end_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
+        self.empty_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
         self.history_end_reached = False
         self._ts_cache: List[float] = []
         self._candle_width_ms = 60_000 * 0.8
@@ -231,7 +251,13 @@ class CandlestickChart:
         self._countdown_timer.start()
 
     def _setup_price_axis(self) -> None:
+        chart = self
+
         class PriceAxis(pg.AxisItem):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._chart = chart
+
             def tickStrings(self, values, scale, spacing):
                 out = []
                 for v in values:
@@ -239,25 +265,16 @@ class CandlestickChart:
                         if not np.isfinite(v) or v <= 0:
                             out.append('')
                             continue
-                        if v >= 1000:
-                            out.append(f'{v:,.0f}')
-                        elif v >= 100:
-                            out.append(f'{v:,.1f}')
-                        elif v >= 10:
-                            out.append(f'{v:,.2f}')
-                        elif v >= 1:
-                            out.append(f'{v:,.3f}')
-                        elif v >= 0.01:
-                            out.append(f'{v:.4f}')
-                        elif v >= 0.0001:
-                            out.append(f'{v:.6f}')
-                        elif v >= 0.000001:
-                            out.append(f'{v:.8f}')
-                        else:
-                            out.append(f'{v:.10f}'.rstrip('0').rstrip('.'))
+                        out.append(self._chart._format_price_value(float(v)))
                     except Exception:
                         out.append('')
                 return out
+
+            def generateDrawSpecs(self, p):
+                axis_spec, tick_specs, text_specs = super().generateDrawSpecs(p)
+                if axis_spec is not None:
+                    axis_spec = (pg.mkPen(QColor(0, 0, 0, 0)), axis_spec[1], axis_spec[2])
+                return (axis_spec, tick_specs, text_specs)
 
             def tickValues(self, minVal, maxVal, size):
                 try:
@@ -307,11 +324,15 @@ class CandlestickChart:
         try:
             price_axis = PriceAxis(orientation='right')
             font = QFont()
-            font.setPointSize(8)
+            font.setPointSize(7)
             price_axis.setTickFont(font)
             self.plot_widget.setAxisItems({'right': price_axis})
             self.plot_widget.showAxis('right')
             self.plot_widget.hideAxis('left')
+            try:
+                price_axis.setStyle(showValues=True)
+            except Exception:
+                pass
             price_axis.setWidth(60)
         except Exception:
             pass
@@ -437,6 +458,12 @@ class CandlestickChart:
                     out.append(date_str)
                 return out
 
+            def generateDrawSpecs(self, p):
+                axis_spec, tick_specs, text_specs = super().generateDrawSpecs(p)
+                if axis_spec is not None:
+                    axis_spec = (pg.mkPen(QColor(0, 0, 0, 0)), axis_spec[1], axis_spec[2])
+                return (axis_spec, tick_specs, text_specs)
+
             def mouseDragEvent(self, ev) -> None:
                 if ev.button() != Qt.MouseButton.LeftButton:
                     ev.ignore()
@@ -458,24 +485,54 @@ class CandlestickChart:
 
         bottom_axis = DateIndexAxis(self, orientation='bottom')
         font = QFont()
-        font.setPointSize(8)
+        font.setPointSize(7)
         bottom_axis.setTickFont(font)
         bottom_axis.setStyle(autoExpandTextSpace=False, tickTextOffset=2)
         bottom_axis.setHeight(38)
+        try:
+            bottom_axis.setStyle(showValues=True)
+        except Exception:
+            pass
         self.plot_widget.setAxisItems({'bottom': bottom_axis})
         left_axis = self.plot_widget.getAxis('left')
         if left_axis:
             left_axis.setTickFont(font)
         self._date_index_axis = bottom_axis
 
+    def _update_candle_width_from_view(self) -> None:
+        if self.timeframe_ms is None:
+            return
+        try:
+            view_box = self.plot_widget.getViewBox()
+            x_range, _ = view_box.viewRange()
+            span = float(x_range[1]) - float(x_range[0])
+        except Exception:
+            return
+        if span <= 0:
+            return
+        visible_bars = span / float(self.timeframe_ms)
+        if visible_bars <= 0:
+            return
+        base_width = float(self.timeframe_ms) * 0.8
+        scale = min(1.0, max(0.3, 240.0 / visible_bars))
+        new_width = base_width * scale
+        if abs(new_width - self._candle_width_ms) >= 1.0:
+            self._candle_width_ms = new_width
+            self.item.candle_width_ms = new_width
+
     def _on_view_changed(self) -> None:
         try:
+            self._update_candle_width_from_view()
             self.item.generate_picture()
             self.item.update()
             if self.volume_item and self.candles:
                 self._update_volume_histogram(self.candles)
             self._update_price_line()
             self._update_history_end_label()
+            self._update_header_position()
+            self._refresh_hover_if_needed()
+            if not self.candles:
+                self._show_empty_state()
         except Exception:
             pass
 
@@ -491,7 +548,15 @@ class CandlestickChart:
             except (ValueError, TypeError):
                 return float(idx)
 
-        volume_color = QColor('#22C55E')
+        def extract_is_up(candle: Iterable[float], idx: int) -> Optional[bool]:
+            try:
+                open_price = float(candle[1])
+                close_price = float(candle[4])
+            except (ValueError, TypeError, IndexError):
+                return None
+            return close_price >= open_price
+
+        volume_color = QColor(self.base_color)
         bar_width = (self.timeframe_ms or 60_000) * 0.8
         self.volume_item, self.volume_max = update_volume_histogram(
             plot_widget=self.plot_widget,
@@ -500,10 +565,52 @@ class CandlestickChart:
             data=candles,
             extract_volume=extract_volume,
             extract_x=extract_x,
+            extract_is_up=extract_is_up,
+            up_color=self.base_color,
+            down_color=self.down_color,
             volume_height_ratio=0.15,
             bar_width=bar_width,
             flush_bottom=True,
         )
+        self._update_volume_baseline()
+
+    def _update_volume_baseline(self) -> None:
+        try:
+            view_box = self.plot_widget.getViewBox()
+            if view_box is None:
+                return
+            (_, y_range) = view_box.viewRange()
+            visible_y_min = y_range[0]
+        except Exception:
+            return
+        pen = pg.mkPen(QColor(25, 29, 38, 200), width=1)
+        if self.volume_baseline is None:
+            self.volume_baseline = pg.InfiniteLine(pos=visible_y_min, angle=0, pen=pen)
+            self.volume_baseline.setZValue(9)
+            self.plot_widget.addItem(self.volume_baseline)
+        else:
+            self.volume_baseline.setPen(pen)
+            self.volume_baseline.setValue(visible_y_min)
+
+    def _show_empty_state(self) -> None:
+        if self.empty_label is None:
+            self.empty_label = pg.QtWidgets.QGraphicsTextItem()
+            self.empty_label.setDefaultTextColor(QColor('#6B7280'))
+            self.empty_label.setZValue(20)
+            self.empty_label.setPlainText('No data')
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.scene().addItem(self.empty_label)
+        plot_item = self.plot_widget.getPlotItem()
+        scene_rect = plot_item.sceneBoundingRect()
+        label_rect = self.empty_label.boundingRect()
+        x = scene_rect.center().x() - (label_rect.width() / 2.0)
+        y = scene_rect.center().y() - (label_rect.height() / 2.0)
+        self.empty_label.setPos(x, y)
+        self.empty_label.show()
+
+    def _hide_empty_state(self) -> None:
+        if self.empty_label is not None:
+            self.empty_label.hide()
 
     def set_historical_data(self, data: List[Iterable[float]], auto_range: bool = True) -> None:
         normalized = []
@@ -522,6 +629,11 @@ class CandlestickChart:
                 continue
             normalized.append([ts, o, h, l, cl, vol])
         if not normalized:
+            self.candles = []
+            self._ts_cache = []
+            self.item.set_data([])
+            self._update_volume_histogram([])
+            self._show_empty_state()
             return
         self.candles = normalized
         self._ts_cache = [float(c[0]) for c in self.candles]
@@ -530,6 +642,9 @@ class CandlestickChart:
         self._update_volume_histogram(self.candles)
         self._update_price_line()
         self._update_history_end_label()
+        self._clear_session_lines()
+        self._refresh_hover_if_needed()
+        self._hide_empty_state()
         if auto_range:
             self._auto_range()
 
@@ -576,6 +691,9 @@ class CandlestickChart:
         self._update_volume_histogram(self.candles)
         self._update_price_line()
         self._update_history_end_label()
+        self._clear_session_lines()
+        self._refresh_hover_if_needed()
+        self._hide_empty_state()
 
     def update_live_trade(self, trade: dict) -> None:
         if not self.candles:
@@ -613,6 +731,9 @@ class CandlestickChart:
         self._update_volume_histogram(self.candles)
         self._update_price_line()
         self._update_history_end_label()
+        self._clear_session_lines()
+        self._refresh_hover_if_needed()
+        self._hide_empty_state()
 
     def _auto_range(self) -> None:
         if not self.candles:
@@ -680,6 +801,7 @@ class CandlestickChart:
             self._update_price_label_position(close_price, color)
         except Exception:
             pass
+        self._update_price_tick(close_price, color)
 
     def set_history_end(self, reached: bool) -> None:
         self.history_end_reached = reached
@@ -728,10 +850,23 @@ class CandlestickChart:
                 remaining = f' {hours:02d}:{minutes:02d}:{seconds:02d}'
             else:
                 remaining = f' {minutes:02d}:{seconds:02d}'
-        price_text = f'{price:.6f}'.rstrip('0').rstrip('.')
+        price_text = self._format_price_value(price)
         if remaining:
             return f'{price_text}\n{remaining.strip()}'
         return f'{price_text}'
+
+    def _format_price_value(self, price: float) -> str:
+        if price >= 1000:
+            return f'{price:,.2f}'
+        if price >= 100:
+            return f'{price:,.2f}'
+        if price >= 1:
+            return f'{price:,.4f}'
+        if price >= 0.01:
+            return f'{price:,.6f}'
+        if price >= 0.0001:
+            return f'{price:,.8f}'
+        return f'{price:,.10f}'
 
     def _parse_timeframe_ms(self, timeframe: str) -> int:
         if not timeframe:
@@ -770,8 +905,8 @@ class CandlestickChart:
         axis_rect = axis.sceneBoundingRect() if axis else None
 
         text_rect = self.price_label.boundingRect()
-        padding_x = 8
-        padding_y = 4
+        padding_x = 4
+        padding_y = 2
         pill_width = text_rect.width() + padding_x * 2
         pill_height = text_rect.height() + padding_y * 2
 
@@ -779,7 +914,7 @@ class CandlestickChart:
             axis_width = axis.width()
             if axis_width <= 0:
                 axis_width = 70
-            x = view_box.sceneBoundingRect().right() + 1
+            x = view_box.sceneBoundingRect().right() 
             pill_width = axis_width
         else:
             x = view_box.sceneBoundingRect().right() + 6
@@ -806,49 +941,208 @@ class CandlestickChart:
         path.lineTo(left, bottom)
         path.closeSubpath()
         bg_color = QColor(color)
-        bg_color.setAlpha(230)
+        bg_color.setAlpha(255)
         self.price_label_bg.setPath(path)
         self.price_label_bg.setBrush(bg_color)
         self.price_label_bg.setPen(pg.mkPen(bg_color))
 
+    def _update_price_tick(self, price: float, color: QColor) -> None:
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.getViewBox()
+        if not view_box:
+            return
+        axis = plot_item.getAxis('right')
+        if axis is None:
+            return
+        scene_pos = view_box.mapViewToScene(QPointF(0, price))
+        axis_rect = axis.sceneBoundingRect()
+        x0 = axis_rect.left()
+        x1 = x0 + 6
+        y = scene_pos.y()
+        if self.price_tick is None:
+            self.price_tick = pg.QtWidgets.QGraphicsLineItem()
+            self.price_tick.setZValue(52)
+            plot_item.scene().addItem(self.price_tick)
+        pen = pg.mkPen(color, width=2)
+        self.price_tick.setPen(pen)
+        self.price_tick.setLine(QLineF(x0, y, x1, y))
+
+    def set_header(self, text: str) -> None:
+        if self.header_label is None:
+            self.header_label = pg.QtWidgets.QGraphicsTextItem()
+            self.header_label.setDefaultTextColor(QColor('#B2B5BE'))
+            self.header_label.setZValue(60)
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.scene().addItem(self.header_label)
+        self.header_label.setPlainText(text)
+        self._update_header_position()
+
+    def _update_header_position(self) -> None:
+        if self.header_label is None:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        scene_rect = plot_item.sceneBoundingRect()
+        self.header_label.setPos(scene_rect.left() + 8, scene_rect.top() + 6)
+
     def _ensure_hover_label(self) -> None:
         if self.hover_label is None:
             self.hover_label = pg.QtWidgets.QGraphicsTextItem()
+            font = QFont()
+            font.setPointSize(8)
+            font.setWeight(QFont.Weight.Light)
+            self.hover_label.setFont(font)
             self.hover_label.setDefaultTextColor(QColor('#B2B5BE'))
+            self.hover_label.document().setDocumentMargin(0)
             self.hover_label.setZValue(60)
             plot_item = self.plot_widget.getPlotItem()
             plot_item.scene().addItem(self.hover_label)
 
+    def _update_hover_label_layout(self) -> None:
+        if self.hover_label is None:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        scene_rect = plot_item.sceneBoundingRect()
+        padding_x = 6
+        padding_y = 3
+        text_rect = self.hover_label.boundingRect()
+        pill_width = text_rect.width() + padding_x * 2
+        pill_height = text_rect.height() + padding_y * 2
+        x = scene_rect.left() + 8
+        y = scene_rect.top() + 28
+        self.hover_label.setPos(x + padding_x, y + padding_y)
+
+        if self.hover_label_bg is None:
+            self.hover_label_bg = pg.QtWidgets.QGraphicsPathItem()
+            self.hover_label_bg.setZValue(self.hover_label.zValue() - 1)
+            plot_item.scene().addItem(self.hover_label_bg)
+        path = QPainterPath()
+        radius = 6.0
+        path.addRoundedRect(QRectF(x, y, pill_width, pill_height), radius, radius)
+        bg_color = QColor('#0F141E')
+        bg_color.setAlpha(140)
+        border_color = QColor(0, 0, 0, 0)
+        self.hover_label_bg.setPath(path)
+        self.hover_label_bg.setBrush(bg_color)
+        self.hover_label_bg.setPen(pg.mkPen(border_color, width=0))
+        self.hover_label_bg.show()
+
+    def _update_hover_outline(self, idx: int, open_price: float, close_price: float) -> None:
+        if idx < 0 or idx >= len(self.candles):
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.getViewBox()
+        if view_box is None:
+            return
+        x_val = float(self.candles[idx][0])
+        width = self._candle_width_ms or 60_000
+        x_left = x_val - (width / 2.0)
+        x_right = x_val + (width / 2.0)
+        body_top = max(open_price, close_price)
+        body_bottom = min(open_price, close_price)
+        if body_top == body_bottom:
+            body_top = body_bottom + (self._candle_width_ms or 60_000) * 0.000001
+        try:
+            top_left = view_box.mapViewToScene(QPointF(x_left, body_top))
+            bottom_right = view_box.mapViewToScene(QPointF(x_right, body_bottom))
+        except Exception:
+            return
+        rect = QRectF(top_left, bottom_right).normalized()
+        if self.hover_outline is None:
+            self.hover_outline = pg.QtWidgets.QGraphicsRectItem()
+            self.hover_outline.setZValue(56)
+            plot_item.scene().addItem(self.hover_outline)
+        pen = pg.mkPen(QColor(180, 190, 205, 180), width=1)
+        self.hover_outline.setPen(pen)
+        self.hover_outline.setBrush(pg.mkBrush(QColor(0, 0, 0, 0)))
+        self.hover_outline.setRect(rect)
+        self.hover_outline.show()
+
     def _ensure_crosshair(self) -> None:
         if self.crosshair_v is None:
-            self.crosshair_v = pg.InfiniteLine(
-                angle=90,
-                pen=pg.mkPen(QColor('#2A2E39'), style=Qt.PenStyle.DashLine),
-            )
+            pen = pg.mkPen(QColor(70, 75, 90, 110), width=1)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setDashPattern([6, 8])
+            self.crosshair_v = pg.InfiniteLine(angle=90, pen=pen)
             self.crosshair_v.setZValue(55)
             self.plot_widget.addItem(self.crosshair_v)
         if self.crosshair_h is None:
-            self.crosshair_h = pg.InfiniteLine(
-                angle=0,
-                pen=pg.mkPen(QColor('#2A2E39'), style=Qt.PenStyle.DashLine),
-            )
+            pen = pg.mkPen(QColor(70, 75, 90, 110), width=1)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setDashPattern([6, 8])
+            self.crosshair_h = pg.InfiniteLine(angle=0, pen=pen)
             self.crosshair_h.setZValue(55)
             self.plot_widget.addItem(self.crosshair_h)
+        if self.hover_band is None:
+            self.hover_band = pg.QtWidgets.QGraphicsRectItem()
+            self.hover_band.setZValue(54)
+            band_color = QColor('#2A2E39')
+            band_color.setAlpha(60)
+            self.hover_band.setBrush(band_color)
+            self.hover_band.setPen(pg.mkPen(QColor(0, 0, 0, 0), width=0))
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.scene().addItem(self.hover_band)
+        if self.cursor_dot is None:
+            self.cursor_dot = pg.QtWidgets.QGraphicsEllipseItem()
+            self.cursor_dot.setZValue(57)
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.scene().addItem(self.cursor_dot)
 
     def _update_crosshair(self, x: float, y: float) -> None:
         self._ensure_crosshair()
+        snapped_x = x
+        if self._ts_cache:
+            min_ts = self._ts_cache[0]
+            max_ts = self._ts_cache[-1]
+            if min_ts <= x <= max_ts:
+                idx = self._index_for_time(x)
+                if idx is not None and 0 <= idx < len(self._ts_cache):
+                    try:
+                        snapped_x = float(self._ts_cache[idx])
+                    except Exception:
+                        snapped_x = x
         if self.crosshair_v is not None:
-            self.crosshair_v.setValue(x)
+            self.crosshair_v.setValue(snapped_x)
             self.crosshair_v.show()
         if self.crosshair_h is not None:
             self.crosshair_h.setValue(y)
             self.crosshair_h.show()
+        if self.hover_band is not None:
+            view_box = self.plot_widget.getPlotItem().getViewBox()
+            if view_box is not None:
+                try:
+                    (x_range, y_range) = view_box.viewRange()
+                    y_min, y_max = y_range
+                    width = self._candle_width_ms or 60_000
+                    rect = QRectF(snapped_x - (width / 2.0), y_min, width, y_max - y_min)
+                    self.hover_band.setRect(rect)
+                    self.hover_band.show()
+                except Exception:
+                    pass
+        self._update_cursor_dot(snapped_x, y)
+        self._update_cursor_price_label(y)
+        self._update_cursor_time_label(snapped_x)
 
     def _hide_crosshair(self) -> None:
         if self.crosshair_v is not None:
             self.crosshair_v.hide()
         if self.crosshair_h is not None:
             self.crosshair_h.hide()
+        if self.cursor_price_label is not None:
+            self.cursor_price_label.hide()
+        if self.cursor_price_label_bg is not None:
+            self.cursor_price_label_bg.hide()
+        if self.cursor_time_label is not None:
+            self.cursor_time_label.hide()
+        if self.cursor_time_label_bg is not None:
+            self.cursor_time_label_bg.hide()
+        if self.hover_band is not None:
+            self.hover_band.hide()
+        if self.cursor_dot is not None:
+            self.cursor_dot.hide()
+        if self.cursor_time_tick is not None:
+            self.cursor_time_tick.hide()
+        if self.hover_outline is not None:
+            self.hover_outline.hide()
 
     def _on_render(self) -> None:
         now = time.time()
@@ -898,6 +1192,7 @@ class CandlestickChart:
         idx = self._index_for_time(view_pos.x())
         if idx is None or idx < 0 or idx >= len(self.candles):
             return
+        self._hover_index = idx
         candle = self.candles[idx]
         if len(candle) < 5:
             return
@@ -911,7 +1206,7 @@ class CandlestickChart:
         if o == 0:
             return
         def fmt_price(val: float) -> str:
-            return f'{val:.6f}'.rstrip('0').rstrip('.')
+            return self._format_price_value(val)
 
         change = c - o
         pct = (change / o) * 100.0
@@ -924,7 +1219,255 @@ class CandlestickChart:
         self._ensure_hover_label()
         if self.hover_label is None:
             return
+        color = QColor('#22C55E') if change >= 0 else QColor('#EF5350')
+        self.hover_label.setDefaultTextColor(color)
         self.hover_label.setPlainText(text)
+        self._update_hover_label_layout()
+        self._update_hover_outline(idx, o, c)
 
-        scene_rect = plot_item.sceneBoundingRect()
-        self.hover_label.setPos(scene_rect.left() + 8, scene_rect.top() + 6)
+    def _refresh_hover_if_needed(self) -> None:
+        if self._hover_index is None or not self.candles:
+            return
+        idx = min(self._hover_index, len(self.candles) - 1)
+        candle = self.candles[idx]
+        if len(candle) < 5:
+            return
+        try:
+            o = float(candle[1])
+            h = float(candle[2])
+            l = float(candle[3])
+            c = float(candle[4])
+        except (ValueError, TypeError):
+            return
+        if o == 0:
+            return
+        def fmt_price(val: float) -> str:
+            return self._format_price_value(val)
+        change = c - o
+        pct = (change / o) * 100.0
+        sign = '+' if change >= 0 else ''
+        text = (
+            f'O {fmt_price(o)}  H {fmt_price(h)}  L {fmt_price(l)}  C {fmt_price(c)}  '
+            f'{sign}{fmt_price(change)} ({sign}{pct:.2f}%)'
+        )
+        color = QColor('#22C55E') if change >= 0 else QColor('#EF5350')
+        self._ensure_hover_label()
+        if self.hover_label is None:
+            return
+        self.hover_label.setDefaultTextColor(color)
+        self.hover_label.setPlainText(text)
+        self._update_hover_label_layout()
+        self._update_hover_outline(idx, o, c)
+
+    def _clear_session_lines(self) -> None:
+        for line in self.session_lines:
+            try:
+                self.plot_widget.removeItem(line)
+            except Exception:
+                pass
+        self.session_lines = []
+
+    def _ensure_cursor_price_label(self) -> None:
+        if self.cursor_price_label is None:
+            self.cursor_price_label = pg.QtWidgets.QGraphicsTextItem()
+            self.cursor_price_label.setDefaultTextColor(QColor('#FFFFFF'))
+            self.cursor_price_label.document().setDocumentMargin(0)
+            self.cursor_price_label.setZValue(62)
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.scene().addItem(self.cursor_price_label)
+
+    def _update_cursor_price_label(self, price: float) -> None:
+        self._ensure_cursor_price_label()
+        if self.cursor_price_label is None:
+            return
+        price_text = self._format_price_value(price)
+        self.cursor_price_label.setPlainText(price_text)
+        self.cursor_price_label.show()
+        self._update_cursor_label_position(price)
+
+    def _update_cursor_label_position(self, price: float) -> None:
+        if self.cursor_price_label is None:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.getViewBox()
+        if not view_box:
+            return
+        scene_pos = view_box.mapViewToScene(QPointF(0, price))
+        axis = plot_item.getAxis('right')
+
+        text_rect = self.cursor_price_label.boundingRect()
+        padding_x = 4
+        padding_y = 2
+        pill_width = text_rect.width() + padding_x * 2
+        pill_height = text_rect.height() + padding_y * 2
+
+        if axis is not None:
+            axis_width = axis.width()
+            if axis_width <= 0:
+                axis_width = 70
+            x = view_box.sceneBoundingRect().right()
+            pill_width = axis_width
+        else:
+            x = view_box.sceneBoundingRect().right() + 6
+        y = scene_pos.y() - (pill_height / 2)
+
+        self.cursor_price_label.setPos(x + padding_x, y + padding_y)
+
+        if self.cursor_price_label_bg is None:
+            self.cursor_price_label_bg = pg.QtWidgets.QGraphicsPathItem()
+            self.cursor_price_label_bg.setZValue(61)
+            plot_item.scene().addItem(self.cursor_price_label_bg)
+
+        path = QPainterPath()
+        radius = 5.0
+        left = x
+        right = x + pill_width
+        top = y
+        bottom = y + pill_height
+        mid = y + (pill_height / 2.0)
+        notch = 6.0
+        path.moveTo(left, top)
+        path.lineTo(right - radius, top)
+        path.quadTo(right, top, right, top + radius)
+        path.lineTo(right, bottom - radius)
+        path.quadTo(right, bottom, right - radius, bottom)
+        path.lineTo(left, bottom)
+        path.lineTo(left, mid + 4)
+        path.lineTo(left - notch, mid)
+        path.lineTo(left, mid - 4)
+        path.closeSubpath()
+        bg_color = QColor('#2A2E39')
+        bg_color.setAlpha(255)
+        self.cursor_price_label_bg.setPath(path)
+        self.cursor_price_label_bg.setBrush(bg_color)
+        self.cursor_price_label_bg.setPen(pg.mkPen(bg_color))
+        self.cursor_price_label_bg.show()
+
+    def _ensure_cursor_time_label(self) -> None:
+        if self.cursor_time_label is None:
+            self.cursor_time_label = pg.QtWidgets.QGraphicsTextItem()
+            self.cursor_time_label.setDefaultTextColor(QColor('#FFFFFF'))
+            self.cursor_time_label.document().setDocumentMargin(0)
+            self.cursor_time_label.setZValue(51)
+            plot_item = self.plot_widget.getPlotItem()
+            plot_item.scene().addItem(self.cursor_time_label)
+
+    def _format_cursor_time(self, ts_ms: float) -> str:
+        try:
+            dt = datetime.fromtimestamp(ts_ms / 1000.0)
+        except Exception:
+            return ''
+        tf_ms = self.timeframe_ms or 60_000
+        if tf_ms >= 86_400_000:
+            return dt.strftime('%Y-%m-%d')
+        if tf_ms >= 3_600_000:
+            return dt.strftime('%Y-%m-%d %H:%M')
+        return dt.strftime('%Y-%m-%d %H:%M')
+
+    def _update_cursor_time_label(self, ts_ms: float) -> None:
+        self._ensure_cursor_time_label()
+        if self.cursor_time_label is None:
+            return
+        text = self._format_cursor_time(ts_ms)
+        if not text:
+            return
+        self.cursor_time_label.setPlainText(text)
+        self.cursor_time_label.show()
+        self._update_cursor_time_label_position(ts_ms)
+
+    def _update_cursor_time_label_position(self, ts_ms: float) -> None:
+        if self.cursor_time_label is None:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.getViewBox()
+        axis = plot_item.getAxis('bottom')
+        if view_box is None or axis is None:
+            return
+        scene_pos = view_box.mapViewToScene(QPointF(ts_ms, 0))
+        axis_rect = axis.sceneBoundingRect()
+
+        text_rect = self.cursor_time_label.boundingRect()
+        padding_x = 4
+        padding_y = 2
+        pill_width = text_rect.width() + padding_x * 2
+        pill_height = text_rect.height() + padding_y * 2
+
+        x = scene_pos.x() - (pill_width / 2.0)
+        min_x = axis_rect.left()
+        max_x = axis_rect.right() - pill_width
+        if x < min_x:
+            x = min_x
+        if x > max_x:
+            x = max_x
+        axis_height = axis.height()
+        if axis_height <= 0:
+            axis_height = 28
+        y = axis_rect.bottom() - axis_height + 1
+
+        self.cursor_time_label.setPos(x + padding_x, y + padding_y)
+
+        if self.cursor_time_label_bg is None:
+            self.cursor_time_label_bg = pg.QtWidgets.QGraphicsPathItem()
+            self.cursor_time_label_bg.setZValue(self.cursor_time_label.zValue() - 1)
+            plot_item.scene().addItem(self.cursor_time_label_bg)
+
+        path = QPainterPath()
+        radius = 4.0
+        notch = 6.0
+        left = x
+        right = x + pill_width
+        top = y
+        bottom = y + pill_height
+        mid_x = x + (pill_width / 2.0)
+        path.moveTo(left + radius, top)
+        path.lineTo(mid_x - 6, top)
+        path.lineTo(mid_x, top - notch)
+        path.lineTo(mid_x + 6, top)
+        path.lineTo(right - radius, top)
+        path.quadTo(right, top, right, top + radius)
+        path.lineTo(right, bottom - radius)
+        path.quadTo(right, bottom, right - radius, bottom)
+        path.lineTo(left + radius, bottom)
+        path.quadTo(left, bottom, left, bottom - radius)
+        path.lineTo(left, top + radius)
+        path.quadTo(left, top, left + radius, top)
+        path.closeSubpath()
+
+        bg_color = QColor('#2A2E39')
+        bg_color.setAlpha(255)
+        self.cursor_time_label_bg.setPath(path)
+        self.cursor_time_label_bg.setBrush(bg_color)
+        self.cursor_time_label_bg.setPen(pg.mkPen(bg_color))
+        self.cursor_time_label_bg.show()
+
+        if self.cursor_time_tick is None:
+            self.cursor_time_tick = pg.QtWidgets.QGraphicsLineItem()
+            self.cursor_time_tick.setZValue(50)
+            plot_item.scene().addItem(self.cursor_time_tick)
+        tick_pen = pg.mkPen(QColor(70, 75, 90, 120), width=1)
+        self.cursor_time_tick.setPen(tick_pen)
+        self.cursor_time_tick.setLine(QLineF(scene_pos.x(), axis_rect.top(), scene_pos.x(), axis_rect.top() + 6))
+        self.cursor_time_tick.show()
+
+    def _update_cursor_dot(self, x: float, y: float) -> None:
+        if self.cursor_dot is None:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        view_box = plot_item.getViewBox()
+        if view_box is None:
+            return
+        try:
+            scene_pos = view_box.mapViewToScene(QPointF(x, y))
+        except Exception:
+            return
+        radius = 2.5
+        self.cursor_dot.setRect(
+            scene_pos.x() - radius,
+            scene_pos.y() - radius,
+            radius * 2,
+            radius * 2,
+        )
+        dot_color = QColor(180, 190, 205, 220)
+        self.cursor_dot.setPen(pg.mkPen(dot_color))
+        self.cursor_dot.setBrush(pg.mkBrush(dot_color))
+        self.cursor_dot.show()
