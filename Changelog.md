@@ -91,3 +91,24 @@
 - Added cursor time tick on the time axis and smaller axis tick fonts.
 - Added dock tab icons and tightened toolbar spacing.
 - Fixed volume bars disappearing when zooming out.
+
+## 0.6.0
+- Skip rendering stale cache when too many bars are missing; fetch missing range first.
+- Avoid marking end-of-history during windowed fetches.
+- Added a Settings action to reset history-end for the current symbol/timeframe.
+- Keep live price label and dotted line updating even when the latest candle is outside the window.
+- Mark history end using binary search when windowed fetches return no older data.
+- Background probe logs earliest-available candle per symbol/timeframe.
+- Probe earliest-available candles for all timeframes when opening a symbol.
+- History-end flag now updates when earliest floor is known and cache reaches it.
+- History-end flag self-heals when cached oldest meets the stored floor.
+- Collapse candles into single line when zoomed out beyond 750 visible bars.
+- Increased max visible bars to 5k.
+- Throttled chart redraws on pan/zoom and added chunked QPicture rendering for candlesticks.
+- Added fast-drag mode to skip hover overlays while panning.
+- Optimized candlestick rendering with chunk invalidation and cached pens/brushes.
+- Windowed backfill now scales with zoom level.
+- Debounced windowed backfill to wait until pan/zoom settles.
+- Windowed fetch now reuses cached edges and only fetches missing ranges when possible.
+- Backfill now re-evaluates the live view range and retriggers when returning to current time.
+- Suppressed live updates during fresh symbol/timeframe loads without cache to avoid partial renders.

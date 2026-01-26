@@ -179,3 +179,13 @@ class DataStore:
                 ''',
                 (exchange, symbol, timeframe, oldest_ts, int(oldest_reached)),
             )
+
+    def clear_history_limit(self, exchange: str, symbol: str, timeframe: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                '''
+                DELETE FROM ohlcv_limits
+                WHERE exchange=? AND symbol=? AND timeframe=?
+                ''',
+                (exchange, symbol, timeframe),
+            )

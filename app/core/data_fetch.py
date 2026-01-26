@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from core.data_store import DataStore
 from core.data_providers import binance
@@ -141,6 +141,12 @@ def load_more_history(
         bars = binance.fetch_ohlcv(symbol, timeframe, new_start, current_min_ts - 1)
         if bars:
             store.store_bars(exchange, symbol, timeframe, bars)
+            try:
+                earliest = int(bars[0][0])
+            except Exception:
+                earliest = None
+            if earliest is not None and earliest >= current_min_ts:
+                store.set_history_limit(exchange, symbol, timeframe, current_min_ts, True)
         else:
             store.set_history_limit(exchange, symbol, timeframe, current_min_ts, True)
             return [list(row) for row in store.load_bars(exchange, symbol, timeframe, current_min_ts, current_max_ts)]
@@ -169,28 +175,48 @@ def load_window_bars(
                 has_gap = True
                 break
             prev_ts = ts
+
+        cached_start = int(cached[0][0])
+        cached_end = int(cached[-1][0])
+        missing_ranges: List[Tuple[int, int]] = []
+        if interval_ms > 0:
+            if cached_start > start_ms + int(interval_ms * 0.5):
+                missing_ranges.append((start_ms, cached_start - interval_ms))
+            if cached_end < end_ms - int(interval_ms * 0.5):
+                missing_ranges.append((cached_end + interval_ms, end_ms))
+
+        if not has_gap and missing_ranges:
+            for miss_start, miss_end in missing_ranges:
+                if miss_start >= miss_end:
+                    continue
+                bars = binance.fetch_ohlcv(symbol, timeframe, miss_start, miss_end)
+                if bars:
+                    store.store_bars(exchange, symbol, timeframe, bars)
+            cached = store.load_bars(exchange, symbol, timeframe, start_ms, end_ms)
+            return [list(row) for row in cached]
+
         expected_min = int((end_ms - start_ms) / interval_ms) if interval_ms > 0 else 0
         if expected_min > 0:
             expected_min = int(expected_min * 0.9)
         if not has_gap and (expected_min <= 0 or len(cached) >= expected_min):
             return [list(row) for row in cached]
 
+    cached_range = store.get_cached_range(exchange, symbol, timeframe)
+    min_ts = cached_range[0] if cached_range else None
+
     bars = binance.fetch_ohlcv(symbol, timeframe, start_ms, end_ms)
+    if not bars and min_ts is not None and start_ms <= min_ts:
+        time.sleep(0.5)
+        bars = binance.fetch_ohlcv(symbol, timeframe, start_ms, end_ms)
+        if not bars:
+            earliest = _find_earliest_ohlcv(symbol, timeframe)
+            if earliest is not None:
+                reached = min_ts <= earliest
+                store.set_history_limit(exchange, symbol, timeframe, earliest, reached)
+            else:
+                store.set_history_limit(exchange, symbol, timeframe, min_ts, True)
     if bars:
         store.store_bars(exchange, symbol, timeframe, bars)
-    cached_range = store.get_cached_range(exchange, symbol, timeframe)
-    if cached_range:
-        min_ts, _ = cached_range
-        if start_ms <= min_ts:
-            if not bars:
-                store.set_history_limit(exchange, symbol, timeframe, min_ts, True)
-            else:
-                try:
-                    earliest = int(bars[0][0])
-                except Exception:
-                    earliest = min_ts
-                if earliest >= min_ts:
-                    store.set_history_limit(exchange, symbol, timeframe, min_ts, True)
     cached = store.load_bars(exchange, symbol, timeframe, start_ms, end_ms)
     return [list(row) for row in cached]
 
@@ -214,3 +240,61 @@ def timeframe_to_ms(timeframe: str) -> int:
     if unit == 'M':
         return mult * 30 * 86_400_000
     return 60_000
+
+
+def ensure_history_floor(
+    store: DataStore,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    max_iters: int = 12,
+) -> Optional[int]:
+    oldest_ts, oldest_reached = store.get_history_limit(exchange, symbol, timeframe)
+    if oldest_ts is not None:
+        if not oldest_reached:
+            cached_range = store.get_cached_range(exchange, symbol, timeframe)
+            if cached_range:
+                min_ts, _ = cached_range
+                if min_ts <= oldest_ts:
+                    store.set_history_limit(exchange, symbol, timeframe, oldest_ts, True)
+        return oldest_ts
+    earliest = _find_earliest_ohlcv(symbol, timeframe, max_iters=max_iters)
+    if earliest is not None:
+        cached_range = store.get_cached_range(exchange, symbol, timeframe)
+        if cached_range:
+            min_ts, _ = cached_range
+            reached = min_ts <= earliest
+        else:
+            reached = False
+        store.set_history_limit(exchange, symbol, timeframe, earliest, reached)
+    return earliest
+
+
+def _find_earliest_ohlcv(
+    symbol: str,
+    timeframe: str,
+    max_iters: int = 12,
+) -> Optional[int]:
+    interval_ms = timeframe_to_ms(timeframe)
+    if interval_ms <= 0:
+        return None
+    now_ms = int(time.time() * 1000)
+    low = 0
+    high = now_ms - interval_ms
+    candidate: Optional[int] = None
+
+    for _ in range(max_iters):
+        if low > high:
+            break
+        mid = (low + high) // 2
+        end = min(now_ms, mid + interval_ms * 5)
+        try:
+            bars = binance.fetch_ohlcv(symbol, timeframe, mid, end)
+        except Exception:
+            bars = []
+        if bars:
+            candidate = int(bars[0][0])
+            high = mid - interval_ms
+        else:
+            low = mid + interval_ms
+    return candidate

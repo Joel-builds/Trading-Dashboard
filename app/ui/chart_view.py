@@ -8,7 +8,7 @@ from PyQt6.QtGui import QFont, QColor, QLinearGradient, QBrush, QIcon
 from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer, QSettings, QSize
 
 from core.data_store import DataStore
-from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars
+from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars, timeframe_to_ms, ensure_history_floor
 from .theme import theme
 from .charts.candlestick_chart import CandlestickChart
 
@@ -106,6 +106,25 @@ class SymbolFetchWorker(QThread):
         try:
             symbols = load_symbols(self.store, self.exchange)
             self.data_ready.emit(symbols)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class HistoryProbeWorker(QThread):
+    result = pyqtSignal(str, str, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, store: DataStore, exchange: str, symbol: str, timeframe: str) -> None:
+        super().__init__()
+        self.store = store
+        self.exchange = exchange
+        self.symbol = symbol
+        self.timeframe = timeframe
+
+    def run(self) -> None:
+        try:
+            earliest = ensure_history_floor(self.store, self.exchange, self.symbol, self.timeframe)
+            self.result.emit(self.symbol, self.timeframe, earliest)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -411,6 +430,9 @@ class ChartView(QWidget):
         self.exchange = 'binance'
         self._worker: Optional[DataFetchWorker] = None
         self._symbol_worker: Optional[SymbolFetchWorker] = None
+        self._history_probe_worker: Optional[HistoryProbeWorker] = None
+        self._history_probe_inflight: set[tuple[str, str]] = set()
+        self._history_probe_queue: List[tuple[str, str]] = []
         self._kline_worker: Optional[LiveKlineWorker] = None
         self._trade_worker: Optional[LiveTradeWorker] = None
         self._symbol_filter = None
@@ -420,16 +442,23 @@ class ChartView(QWidget):
         self._backfill_timer = QTimer(self)
         self._backfill_timer.setSingleShot(True)
         self._backfill_timer.timeout.connect(self._trigger_window_load)
+        self._backfill_debounce_timer = QTimer(self)
+        self._backfill_debounce_timer.setSingleShot(True)
+        self._backfill_debounce_timer.timeout.connect(self._evaluate_backfill)
         self._pending_backfill_view: Optional[tuple[float, float]] = None
         self._window_bars = 2000
         self._window_buffer_bars = 500
         self._window_start_ms: Optional[int] = None
         self._window_end_ms: Optional[int] = None
         self._ignore_view_range = False
-        self._max_visible_bars = 1000
+        self._max_visible_bars = 5000
         self._clamp_in_progress = False
         self._fetch_start_ms: Optional[int] = None
         self._last_fetch_duration_ms: Optional[int] = None
+        self._stale_cache_bars_threshold = 10
+        self._initial_load_pending = False
+        self._pending_kline: Optional[dict] = None
+        self._pending_trade: Optional[dict] = None
 
     def _load_symbols(self) -> None:
         if self._symbol_worker and self._symbol_worker.isRunning():
@@ -452,6 +481,7 @@ class ChartView(QWidget):
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.current_timeframe
         self._update_chart_header(symbol, timeframe)
+        self._enqueue_history_probe_for_symbol(symbol)
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
 
@@ -487,6 +517,19 @@ class ChartView(QWidget):
         bar_count = 500
         self.candles.set_timeframe(timeframe)
         mode = 'load_cached' if use_cache_only else 'load'
+        cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
+        self._stop_live_stream()
+        self._initial_load_pending = bool(not use_cache_only and cached_range is None)
+        self._pending_kline = None
+        self._pending_trade = None
+        if cached_range is not None:
+            _, cached_max = cached_range
+            interval_ms = timeframe_to_ms(timeframe)
+            now_ms = int(time.time() * 1000)
+            if interval_ms > 0:
+                missing_bars = max(0, (now_ms - cached_max) // interval_ms)
+                if missing_bars >= self._stale_cache_bars_threshold:
+                    mode = 'load'
         self._start_fetch(mode, symbol, timeframe, bar_count)
 
     def _on_load_clicked(self) -> None:
@@ -497,6 +540,7 @@ class ChartView(QWidget):
         self._update_active_tab_symbol(symbol)
         timeframe = self.current_timeframe
         self._update_chart_header(symbol, timeframe)
+        self._enqueue_history_probe_for_symbol(symbol)
         cached_range = self.store.get_cached_range(self.exchange, symbol, timeframe)
         self._load_initial_data(use_cache_only=bool(cached_range))
 
@@ -763,12 +807,17 @@ class ChartView(QWidget):
                     except Exception:
                         pass
                     self._pending_backfill_view = None
+                if self._initial_load_pending:
+                    self._apply_pending_live_updates()
+                    self._initial_load_pending = False
             except Exception as exc:
                 self._ignore_view_range = False
                 self._report_error(f'Chart render failed: {exc}')
         self._refresh_history_end_status()
         self._emit_debug_state()
         self._start_live_stream()
+        if self._last_fetch_mode in ('load', 'load_cached'):
+            self._start_history_probe()
 
     def _on_error(self, message: str) -> None:
         self.status_label.setText(f'Error: {message}')
@@ -799,16 +848,67 @@ class ChartView(QWidget):
             except Exception:
                 pass
 
+    def _enqueue_history_probe_for_symbol(self, symbol: str) -> None:
+        for timeframe in self.timeframe_buttons.keys():
+            self._enqueue_history_probe(symbol, timeframe)
+        self._start_next_history_probe()
+
+    def _enqueue_history_probe(self, symbol: str, timeframe: str) -> None:
+        key = (symbol, timeframe)
+        if key in self._history_probe_inflight:
+            return
+        if key in self._history_probe_queue:
+            return
+        self._history_probe_queue.append(key)
+
+    def _start_history_probe(self) -> None:
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.current_timeframe
+        self._enqueue_history_probe(symbol, timeframe)
+        self._start_next_history_probe()
+
+    def _start_next_history_probe(self) -> None:
+        if self._history_probe_worker and self._history_probe_worker.isRunning():
+            return
+        if not self._history_probe_queue:
+            return
+        symbol, timeframe = self._history_probe_queue.pop(0)
+        key = (symbol, timeframe)
+        if key in self._history_probe_inflight:
+            return
+        self._history_probe_inflight.add(key)
+        self._report_error(f'[history] Probing earliest {symbol} {timeframe}...')
+        self._history_probe_worker = HistoryProbeWorker(self.store, self.exchange, symbol, timeframe)
+        self._history_probe_worker.result.connect(self._on_history_probe_result)
+        self._history_probe_worker.error.connect(self._on_history_probe_error)
+        self._history_probe_worker.finished.connect(self._on_history_probe_finished)
+        self._history_probe_worker.start()
+
+    def _on_history_probe_result(self, symbol: str, timeframe: str, earliest) -> None:
+        if earliest is None:
+            self._report_error(f'[history] No earliest candle found for {symbol} {timeframe}.')
+        else:
+            try:
+                ts_str = datetime.fromtimestamp(int(earliest) / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                ts_str = str(earliest)
+            self._report_error(f'[history] Earliest {symbol} {timeframe}: {ts_str}')
+        self._emit_debug_state()
+
+    def _on_history_probe_error(self, message: str) -> None:
+        self._report_error(f'[history] Probe failed: {message}')
+
+    def _on_history_probe_finished(self) -> None:
+        worker = self._history_probe_worker
+        if worker is not None:
+            self._history_probe_inflight.discard((worker.symbol, worker.timeframe))
+        self._start_next_history_probe()
+
     def _start_live_stream(self) -> None:
         symbol = self.symbol_box.currentText() or 'BTCUSDT'
         timeframe = self.current_timeframe
         self.candles.set_timeframe(timeframe)
-        if self._kline_worker is not None:
-            self._kline_worker.stop()
-            self._kline_worker = None
-        if self._trade_worker is not None:
-            self._trade_worker.stop()
-            self._trade_worker = None
+        self._stop_live_stream()
         self._kline_worker = LiveKlineWorker(symbol, timeframe)
         self._kline_worker.kline.connect(self._on_kline)
         self._kline_worker.error.connect(lambda msg: self._report_error(f'Live stream error: {msg}'))
@@ -817,6 +917,16 @@ class ChartView(QWidget):
         self._trade_worker.trade.connect(self._on_trade)
         self._trade_worker.error.connect(lambda msg: self._report_error(f'Trade stream error: {msg}'))
         self._trade_worker.start()
+
+    def _stop_live_stream(self) -> None:
+        if self._kline_worker is not None:
+            self._kline_worker.stop()
+            self._kline_worker.wait(500)
+            self._kline_worker = None
+        if self._trade_worker is not None:
+            self._trade_worker.stop()
+            self._trade_worker.wait(500)
+            self._trade_worker = None
 
     def shutdown(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -839,6 +949,9 @@ class ChartView(QWidget):
         pixmap.save(path, 'PNG')
 
     def _on_kline(self, kline: dict) -> None:
+        if self._initial_load_pending:
+            self._pending_kline = kline
+            return
         try:
             self.candles.update_live_kline(kline)
         except Exception as exc:
@@ -861,11 +974,41 @@ class ChartView(QWidget):
         self._emit_debug_state()
 
     def _on_trade(self, trade: dict) -> None:
+        if self._initial_load_pending:
+            self._pending_trade = trade
+            return
         try:
             self.candles.update_live_trade(trade)
         except Exception as exc:
             self._report_error(f'Live trade update failed: {exc}')
         self._emit_debug_state()
+
+    def _apply_pending_live_updates(self) -> None:
+        if self._pending_kline is not None:
+            kline = self._pending_kline
+            self._pending_kline = None
+            try:
+                self.candles.update_live_kline(kline)
+                if kline.get('closed'):
+                    ts = int(kline.get('ts_ms', 0))
+                    o = float(kline.get('open', 0))
+                    h = float(kline.get('high', 0))
+                    l = float(kline.get('low', 0))
+                    c = float(kline.get('close', 0))
+                    v = float(kline.get('volume', 0))
+                    if ts > 0 and o > 0 and h > 0 and l > 0 and c > 0:
+                        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+                        timeframe = self.current_timeframe
+                        self.store.store_bars(self.exchange, symbol, timeframe, [[ts, o, h, l, c, v]])
+            except Exception as exc:
+                self._report_error(f'Live candle update failed: {exc}')
+        if self._pending_trade is not None:
+            trade = self._pending_trade
+            self._pending_trade = None
+            try:
+                self.candles.update_live_trade(trade)
+            except Exception as exc:
+                self._report_error(f'Live trade update failed: {exc}')
 
     def _set_timeframe(self, timeframe: str) -> None:
         if timeframe == self.current_timeframe:
@@ -917,10 +1060,24 @@ class ChartView(QWidget):
             finally:
                 self._clamp_in_progress = False
             return
-        if self._backfill_pending or self._worker and self._worker.isRunning():
+        self._pending_backfill_view = (x_min, x_max)
+        self._backfill_debounce_timer.start(250)
+        self._emit_debug_state()
+
+    def _evaluate_backfill(self) -> None:
+        if self._backfill_pending or (self._worker and self._worker.isRunning()):
             return
         if self._current_loaded_range()[0] is None:
             return
+        try:
+            view_box = self.plot_widget.getViewBox()
+            x_range, _ = view_box.viewRange()
+            x_min, x_max = x_range
+        except Exception:
+            if not self._pending_backfill_view:
+                return
+            x_min, x_max = self._pending_backfill_view
+        tf_ms = self.candles.timeframe_ms or 60_000
         visible_span = max(1.0, x_max - x_min)
         edge_threshold = max(5 * tf_ms, visible_span * 0.08)
         current_min_ts, current_max_ts = self._current_loaded_range()
@@ -933,12 +1090,16 @@ class ChartView(QWidget):
         now_ms = int(time.time() * 1000)
         right_at_end = (now_ms - current_max_ts) <= edge_threshold
         left_near = (x_min - current_min_ts) <= edge_threshold
-        right_near = (current_max_ts - x_max) <= edge_threshold
-        if (left_near and not left_at_end) or (right_near and not right_at_end):
-            self._pending_backfill_view = (x_min, x_max)
+        right_near = (x_max >= current_max_ts - edge_threshold)
+        left_beyond = (x_min <= current_min_ts - edge_threshold)
+        right_beyond = (x_max >= current_max_ts + edge_threshold)
+        if (left_near or left_beyond) and not left_at_end:
             self._backfill_pending = True
             self._backfill_timer.start(200)
-        self._emit_debug_state()
+            return
+        if (right_near or right_beyond) and not right_at_end:
+            self._backfill_pending = True
+            self._backfill_timer.start(200)
 
     def _trigger_window_load(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -949,11 +1110,15 @@ class ChartView(QWidget):
             return
         x_min, x_max = self._pending_backfill_view
         tf_ms = self.candles.timeframe_ms or 60_000
-        buffer_ms = int(self._window_buffer_bars * tf_ms)
+        visible_span = max(1.0, x_max - x_min)
+        visible_bars = max(1.0, visible_span / float(tf_ms))
+        window_bars = max(self._window_bars, int(visible_bars * 1.5))
+        buffer_bars = max(self._window_buffer_bars, int(visible_bars * 0.25))
+        buffer_ms = int(buffer_bars * tf_ms)
         desired_start = int(x_min - buffer_ms)
         desired_end = int(x_max + buffer_ms)
         desired_span = desired_end - desired_start
-        window_span = int(self._window_bars * tf_ms)
+        window_span = int(window_bars * tf_ms)
         if desired_span < window_span:
             center = (desired_start + desired_end) / 2.0
             desired_start = int(center - (window_span / 2.0))
@@ -994,6 +1159,20 @@ class ChartView(QWidget):
             self.candles.set_history_end(reached)
         except Exception:
             pass
+
+    def clear_history_end(self) -> None:
+        symbol = self.symbol_box.currentText() or 'BTCUSDT'
+        timeframe = self.current_timeframe
+        try:
+            self.store.clear_history_limit(self.exchange, symbol, timeframe)
+        except Exception as exc:
+            self._report_error(f'History limit reset failed: {exc}')
+            return
+        try:
+            self.candles.set_history_end(False)
+        except Exception:
+            pass
+        self._emit_debug_state()
 
     def _emit_debug_state(self) -> None:
         if self.debug_sink is None:

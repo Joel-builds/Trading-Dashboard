@@ -235,6 +235,10 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._open_settings)
         settings_menu.addAction(settings_action)
 
+        reset_history_action = QAction('Reset History End (Current)...', self)
+        reset_history_action.triggered.connect(self._reset_history_end)
+        settings_menu.addAction(reset_history_action)
+
         themes_menu = settings_menu.addMenu('Themes')
         themes_action = QAction('Theme Editor...', self)
         themes_action.triggered.connect(self._open_theme_editor)
@@ -288,6 +292,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
 
         dialog.exec()
+
+    def _reset_history_end(self) -> None:
+        try:
+            self.chart_view.clear_history_end()
+        except Exception:
+            pass
 
     def _export_chart_png(self) -> None:
         default_path = os.path.join(os.path.expanduser('~'), 'pysuperchart.png')

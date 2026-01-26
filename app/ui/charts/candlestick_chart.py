@@ -31,8 +31,38 @@ class CandlestickItem(pg.GraphicsObject):
         self._is_painting = False
         self.candle_width_ms = 60_000 * 0.8
         self._ts_cache: List[float] = []
+        self._chunk_size = 300
+        self._chunk_cache: dict[int, QPicture] = {}
+        self._pen_up = pg.mkPen(self.base_color, width=1)
+        self._pen_down = pg.mkPen(self.down_color, width=1)
+        self._brush_up = pg.mkBrush(self.base_color)
+        self._brush_down = pg.mkBrush(self.down_color)
+        self._pen_cache: dict[tuple[int, int, int, int], pg.QtGui.QPen] = {}
+        self._brush_cache: dict[tuple[int, int, int, int], pg.QtGui.QBrush] = {}
         self._render_callback = render_callback
         self.generate_picture()
+
+    def _get_pen(self, color: QColor) -> pg.QtGui.QPen:
+        try:
+            key = color.getRgb()
+        except Exception:
+            return pg.mkPen(color, width=1)
+        pen = self._pen_cache.get(key)
+        if pen is None:
+            pen = pg.mkPen(color, width=1)
+            self._pen_cache[key] = pen
+        return pen
+
+    def _get_brush(self, color: QColor) -> pg.QtGui.QBrush:
+        try:
+            key = color.getRgb()
+        except Exception:
+            return pg.mkBrush(color)
+        brush = self._brush_cache.get(key)
+        if brush is None:
+            brush = pg.mkBrush(color)
+            self._brush_cache[key] = brush
+        return brush
 
     def generate_picture(self) -> None:
         if self._is_painting:
@@ -40,38 +70,63 @@ class CandlestickItem(pg.GraphicsObject):
         self._is_painting = True
         try:
             self.picture = QPicture()
-            painter = QPainter(self.picture)
-            try:
-                if len(self.data) == 0:
-                    self._cached_bounds = QRectF(0, 0, 1, 1)
-                    return
-                w = (self.candle_width_ms / 2.0) if self.candle_width_ms else 0.3
+            if len(self.data) == 0:
+                self._cached_bounds = QRectF(0, 0, 1, 1)
+                return
+            w = (self.candle_width_ms / 2.0) if self.candle_width_ms else 0.3
+            y_min = float('inf')
+            y_max = float('-inf')
+            x_min = float('inf')
+            x_max = float('-inf')
+            for candle in self.data:
+                if len(candle) < 5:
+                    continue
                 try:
-                    vb = self.getViewBox()
-                except Exception:
-                    vb = None
-                if vb and self._ts_cache:
-                    try:
-                        (x_range, _) = vb.viewRange()
-                        x_min_view, x_max_view = x_range
-                    except Exception:
-                        x_min_view, x_max_view = None, None
-                else:
-                    x_min_view, x_max_view = None, None
-                if x_min_view is not None and x_max_view is not None and self._ts_cache:
-                    start_idx = max(0, bisect_left(self._ts_cache, x_min_view) - 10)
-                    end_idx = min(len(self.data), bisect_right(self._ts_cache, x_max_view) + 10)
-                else:
-                    start_idx, end_idx = 0, len(self.data)
-                step = 1
-                visible_count = max(0, end_idx - start_idx)
-                wick_width = 0 if visible_count > 700 else 1
-                y_min = float('inf')
-                y_max = float('-inf')
-                x_min = float('inf')
-                x_max = float('-inf')
+                    x_val = float(candle[0])
+                    high = float(candle[2])
+                    low = float(candle[3])
+                except (ValueError, TypeError):
+                    continue
+                if low <= 0 or high <= 0:
+                    continue
+                if not (np.isfinite(low) and np.isfinite(high)):
+                    continue
+                y_min = min(y_min, low)
+                y_max = max(y_max, high)
+                x_min = min(x_min, x_val - w)
+                x_max = max(x_max, x_val + w)
+            if y_min != float('inf') and y_max != float('-inf'):
+                self._cached_bounds = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
+            else:
+                self._cached_bounds = QRectF(0, 0, 1, 1)
+        finally:
+            self._is_painting = False
 
-                for idx in range(start_idx, end_idx, step):
+    def paint(self, painter: QPainter, option, widget) -> None:
+        try:
+            if not self.data:
+                return
+            w = (self.candle_width_ms / 2.0) if self.candle_width_ms else 0.3
+            try:
+                vb = self.getViewBox()
+            except Exception:
+                vb = None
+            if vb and self._ts_cache:
+                try:
+                    (x_range, _) = vb.viewRange()
+                    x_min_view, x_max_view = x_range
+                except Exception:
+                    x_min_view, x_max_view = None, None
+            else:
+                x_min_view, x_max_view = None, None
+            if x_min_view is not None and x_max_view is not None and self._ts_cache:
+                start_idx = max(0, bisect_left(self._ts_cache, x_min_view) - 10)
+                end_idx = min(len(self.data), bisect_right(self._ts_cache, x_max_view) + 10)
+            else:
+                start_idx, end_idx = 0, len(self.data)
+            visible_count = max(0, end_idx - start_idx)
+            if visible_count > 750:
+                for idx in range(start_idx, end_idx):
                     candle = self.data[idx]
                     if len(candle) < 5:
                         continue
@@ -85,56 +140,22 @@ class CandlestickItem(pg.GraphicsObject):
                         continue
                     if low <= 0 or high <= 0 or open_price <= 0 or close <= 0:
                         continue
-                    if not (np.isfinite(low) and np.isfinite(high) and np.isfinite(open_price) and np.isfinite(close)):
+                    if not (np.isfinite(low) and np.isfinite(high)):
                         continue
-                    if high < low:
-                        high, low = low, high
-                    price_avg = (open_price + close) / 2.0
-                    if price_avg <= 0 or not np.isfinite(price_avg):
-                        continue
-                    price_range = high - low
-                    if price_range > price_avg * 10:
-                        continue
-                    if low < price_avg * 0.1 or high > price_avg * 10:
-                        continue
-                    y_min = min(y_min, low)
-                    y_max = max(y_max, high)
-                    x_min = min(x_min, x_val - w)
-                    x_max = max(x_max, x_val + w)
-
-                    is_bear = close < open_price
                     if len(self.bar_colors) > 0 and idx < len(self.bar_colors) and self.bar_colors[idx] is not None:
-                        current_color = self.bar_colors[idx]
+                        painter.setPen(self._get_pen(self.bar_colors[idx]))
                     else:
-                        current_color = self.down_color if is_bear else self.base_color
-
-                    wick_pen = pg.mkPen(current_color, width=wick_width)
-                    body_pen = pg.mkPen(current_color, width=1)
-                    painter.setBrush(pg.mkBrush(current_color))
-                    if high != low:
-                        painter.setPen(wick_pen)
-                        painter.drawLine(QPointF(x_val, low), QPointF(x_val, high))
-                    painter.setPen(body_pen)
-                    body_top = max(open_price, close)
-                    body_bottom = min(open_price, close)
-                    body_height = body_top - body_bottom
-                    if body_height > 0:
-                        painter.drawRect(QRectF(x_val - w, body_bottom, w * 2, body_height))
-                    else:
-                        painter.drawLine(QPointF(x_val - w, close), QPointF(x_val + w, close))
-
-                if y_min != float('inf') and y_max != float('-inf'):
-                    self._cached_bounds = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
-                else:
-                    self._cached_bounds = QRectF(self.picture.boundingRect())
-            finally:
-                painter.end()
-        finally:
-            self._is_painting = False
-
-    def paint(self, painter: QPainter, option, widget) -> None:
-        try:
-            painter.drawPicture(0, 0, self.picture)
+                        painter.setPen(self._pen_down if close < open_price else self._pen_up)
+                    painter.drawLine(QPointF(x_val, low), QPointF(x_val, high))
+                return
+            chunk_start = start_idx // self._chunk_size
+            chunk_end = (end_idx - 1) // self._chunk_size if end_idx > 0 else chunk_start
+            for chunk_idx in range(chunk_start, chunk_end + 1):
+                picture = self._chunk_cache.get(chunk_idx)
+                if picture is None:
+                    picture = self._render_chunk(chunk_idx, w)
+                    self._chunk_cache[chunk_idx] = picture
+                painter.drawPicture(0, 0, picture)
         except RuntimeError:
             pass
         if self._render_callback is not None:
@@ -155,11 +176,22 @@ class CandlestickItem(pg.GraphicsObject):
                 pass
         return QRectF(self.picture.boundingRect())
 
-    def set_data(self, data: List[Iterable[float]], bar_colors: Optional[List[Optional[QColor]]] = None) -> None:
+    def set_data(
+        self,
+        data: List[Iterable[float]],
+        bar_colors: Optional[List[Optional[QColor]]] = None,
+        invalidate_from_idx: Optional[int] = None,
+    ) -> None:
         if bar_colors is not None:
             self.bar_colors = bar_colors
+        previous_len = len(self.data)
         self.data = data
         self._ts_cache = []
+        if invalidate_from_idx is None or len(self.data) < previous_len:
+            self._chunk_cache = {}
+        else:
+            start_chunk = max(0, int(invalidate_from_idx) // self._chunk_size)
+            self._chunk_cache = {k: v for k, v in self._chunk_cache.items() if k < start_chunk}
         for candle in self.data:
             if len(candle) < 1:
                 continue
@@ -177,6 +209,63 @@ class CandlestickItem(pg.GraphicsObject):
             self.update()
         except RuntimeError:
             pass
+
+    def _render_chunk(self, chunk_idx: int, w: float) -> QPicture:
+        picture = QPicture()
+        painter = QPainter(picture)
+        try:
+            start_idx = chunk_idx * self._chunk_size
+            end_idx = min(len(self.data), start_idx + self._chunk_size)
+            for idx in range(start_idx, end_idx):
+                candle = self.data[idx]
+                if len(candle) < 5:
+                    continue
+                try:
+                    x_val = float(candle[0])
+                    open_price = float(candle[1])
+                    high = float(candle[2])
+                    low = float(candle[3])
+                    close = float(candle[4])
+                except (ValueError, TypeError):
+                    continue
+                if low <= 0 or high <= 0 or open_price <= 0 or close <= 0:
+                    continue
+                if not (np.isfinite(low) and np.isfinite(high) and np.isfinite(open_price) and np.isfinite(close)):
+                    continue
+                if high < low:
+                    high, low = low, high
+                price_avg = (open_price + close) / 2.0
+                if price_avg <= 0 or not np.isfinite(price_avg):
+                    continue
+                price_range = high - low
+                if price_range > price_avg * 10:
+                    continue
+                if low < price_avg * 0.1 or high > price_avg * 10:
+                    continue
+
+                is_bear = close < open_price
+                if len(self.bar_colors) > 0 and idx < len(self.bar_colors) and self.bar_colors[idx] is not None:
+                    current_color = self.bar_colors[idx]
+                else:
+                    current_color = self.down_color if is_bear else self.base_color
+
+                wick_pen = self._get_pen(current_color)
+                body_pen = self._get_pen(current_color)
+                painter.setBrush(self._get_brush(current_color))
+                if high != low:
+                    painter.setPen(wick_pen)
+                    painter.drawLine(QPointF(x_val, low), QPointF(x_val, high))
+                painter.setPen(body_pen)
+                body_top = max(open_price, close)
+                body_bottom = min(open_price, close)
+                body_height = body_top - body_bottom
+                if body_height > 0:
+                    painter.drawRect(QRectF(x_val - w, body_bottom, w * 2, body_height))
+                else:
+                    painter.drawLine(QPointF(x_val - w, close), QPointF(x_val + w, close))
+        finally:
+            painter.end()
+        return picture
 
 
 class CandlestickChart:
@@ -210,6 +299,8 @@ class CandlestickChart:
         self._countdown_timer.setInterval(1000)
         self._countdown_timer.timeout.connect(self._refresh_countdown)
         self._last_trade_update_ms: int = 0
+        self._live_price: Optional[float] = None
+        self._live_open: Optional[float] = None
         self.hover_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
         self.hover_label_bg: Optional[pg.QtWidgets.QGraphicsPathItem] = None
         self.hover_outline: Optional[pg.QtWidgets.QGraphicsRectItem] = None
@@ -226,6 +317,13 @@ class CandlestickChart:
         self._render_last_ts = time.time()
         self._render_fps = 0.0
         self._last_render_ms = 0
+        self._view_redraw_timer = QTimer()
+        self._view_redraw_timer.setSingleShot(True)
+        self._view_redraw_timer.timeout.connect(self._flush_view_redraw)
+        self._fast_mode = False
+        self._fast_mode_timer = QTimer()
+        self._fast_mode_timer.setSingleShot(True)
+        self._fast_mode_timer.timeout.connect(self._disable_fast_mode)
 
         self.plot_widget.setClipToView(True)
         try:
@@ -521,6 +619,32 @@ class CandlestickChart:
             self.item.candle_width_ms = new_width
 
     def _on_view_changed(self) -> None:
+        self._enable_fast_mode()
+        if self._view_redraw_timer.isActive():
+            return
+        self._view_redraw_timer.start(50)
+
+    def _enable_fast_mode(self) -> None:
+        if self._fast_mode:
+            self._fast_mode_timer.start(150)
+            return
+        self._fast_mode = True
+        if self.hover_band is not None:
+            self.hover_band.hide()
+        if self.cursor_dot is not None:
+            self.cursor_dot.hide()
+        if self.hover_outline is not None:
+            self.hover_outline.hide()
+        self._fast_mode_timer.start(150)
+
+    def _disable_fast_mode(self) -> None:
+        self._fast_mode = False
+        try:
+            self._refresh_hover_if_needed()
+        except Exception:
+            pass
+
+    def _flush_view_redraw(self) -> None:
         try:
             self._update_candle_width_from_view()
             self.item.generate_picture()
@@ -530,7 +654,8 @@ class CandlestickChart:
             self._update_price_line()
             self._update_history_end_label()
             self._update_header_position()
-            self._refresh_hover_if_needed()
+            if not self._fast_mode:
+                self._refresh_hover_if_needed()
             if not self.candles:
                 self._show_empty_state()
         except Exception:
@@ -668,6 +793,9 @@ class CandlestickChart:
         if o <= 0 or h <= 0 or l <= 0 or c <= 0:
             return
 
+        self._live_price = c
+        self._live_open = o
+
         if not self.candles:
             self.candles = [[ts_ms, o, h, l, c, v]]
         else:
@@ -687,12 +815,14 @@ class CandlestickChart:
             self.time_offset_ms = int(kline.get('time_offset_ms', 0))
         except Exception:
             self.time_offset_ms = 0
-        self.item.set_data(self.candles, bar_colors=self.bar_colors)
+        tail_idx = max(0, len(self.candles) - 2)
+        self.item.set_data(self.candles, bar_colors=self.bar_colors, invalidate_from_idx=tail_idx)
         self._update_volume_histogram(self.candles)
         self._update_price_line()
         self._update_history_end_label()
         self._clear_session_lines()
-        self._refresh_hover_if_needed()
+        if not self._fast_mode:
+            self._refresh_hover_if_needed()
         self._hide_empty_state()
 
     def update_live_trade(self, trade: dict) -> None:
@@ -708,6 +838,12 @@ class CandlestickChart:
             return
         if ts_ms <= 0 or price <= 0:
             return
+
+        self._live_price = price
+        try:
+            self._live_open = float(self.candles[-1][1])
+        except Exception:
+            pass
 
         last = self.candles[-1]
         if len(last) < 6:
@@ -727,12 +863,14 @@ class CandlestickChart:
         v = v + max(0.0, qty)
         self.candles[-1] = [last_ts, o, h, l, price, v]
 
-        self.item.set_data(self.candles, bar_colors=self.bar_colors)
+        tail_idx = max(0, len(self.candles) - 2)
+        self.item.set_data(self.candles, bar_colors=self.bar_colors, invalidate_from_idx=tail_idx)
         self._update_volume_histogram(self.candles)
         self._update_price_line()
         self._update_history_end_label()
         self._clear_session_lines()
-        self._refresh_hover_if_needed()
+        if not self._fast_mode:
+            self._refresh_hover_if_needed()
         self._hide_empty_state()
 
     def _auto_range(self) -> None:
@@ -765,16 +903,21 @@ class CandlestickChart:
             pass
 
     def _update_price_line(self) -> None:
-        if not self.candles:
-            return
-        last = self.candles[-1]
-        if len(last) < 5:
-            return
-        try:
-            open_price = float(last[1])
-            close_price = float(last[4])
-        except (ValueError, TypeError):
-            return
+        close_price = self._live_price
+        open_price = self._live_open
+        if close_price is None:
+            if not self.candles:
+                return
+            last = self.candles[-1]
+            if len(last) < 5:
+                return
+            try:
+                open_price = float(last[1])
+                close_price = float(last[4])
+            except (ValueError, TypeError):
+                return
+        if open_price is None:
+            open_price = close_price
         color = self.base_color if close_price >= open_price else self.down_color
         if self.price_line is None:
             self.price_line = pg.InfiniteLine(
@@ -1173,6 +1316,9 @@ class CandlestickChart:
 
     def _on_mouse_moved(self, scene_pos) -> None:
         if not self.candles:
+            return
+        if self._fast_mode:
+            self._hide_crosshair()
             return
         plot_item = self.plot_widget.getPlotItem()
         view_box = plot_item.getViewBox()
