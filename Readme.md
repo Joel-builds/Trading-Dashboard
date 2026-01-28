@@ -1,64 +1,60 @@
-# PySuperChart (PyQt6 + pyqtgraph)
+# PySuperChart
 
-Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) charting, hot-reloadable indicators(TODO), and cached exchange data (SQLite).
+A local, open‑source trading workstation in progress - planned to cover the full workflow from analysis and strategy design to deep backtesting and automation.
 
-## Current Status - V1 WIP
-- PyQt6 app scaffolded with dark theme and chart view.
-- Candlestick chart rendering wired with volume overlay and gridlines.
-- Binance OHLCV fetch + SQLite caching implemented.
-- Symbol/timeframe changes auto-load and reuse cached data when available.
-- Live chart updates (WebSocket) and price marker on the right axis.
-- Startup cache forward-fill and backfill are in place.
-- Auto backfill triggers when panning to the left edge (cache-first, API fallback).
-- Backfill loads fixed-size chunks so older history is incremental.
-- Hover shows OHLC + change stats for any candle.
-- Live updates now use both kline and trade streams for faster ticks.
-- Zoom-out is capped at 1k visible bars to keep rendering stable with 2k buffer.
-- Cache tracks end-of-history and shows a chart label when reached.
-- Candles render on a timestamp axis with windowed loading around the visible range.
-- Window loading stops at the earliest available history once reached.
-- Debug dock shows live performance and window metrics.
-- Symbol tabs above the chart support quick switching, adding via "+", and persistence.
-- Each symbol tab stores its own timeframe.
-- Crosshair cursor with dashed X/Y guides follows the mouse.
-- Window menu lets you re-open hidden docks.
-- Settings dialog stub added under the Settings menu.
-- Theme editor stub added under Settings → Themes.
-- Custom title bar and app icon set for PySuperChart.
-- Mouse wheel zoom now only affects the time axis.
-- Mouse wheel zoom sensitivity increased.
-- Left-drag on the price scale adjusts the y-axis.
+**Why it exists**  
+Most charting platforms are cloud-locked or technically constrained. PySuperChart stays
+local so it’s fast, private, and scalable.
 
-## Quick Start
-1) Create/activate your Python environment
-2) Install dependencies:
-```
+## Key Features
+- High-performance charting with windowed loading and LOD
+- SQLite cache + live market streams
+- Indicator system under development
+- Strategy runtime + backtesting architecture planned
+- Deep backtester architecture planned
+- Clean, modern dark-theme UI
+
+## Tech Stack
+- Python + PyQt6 + pyqtgraph
+- SQLite cache
+- Modular data providers (main exchanges now, brokers later)
+
+## Status
+**V1 is WIP.** Core charting is stable, indicators are under active development.
+
+## Roadmap
+
+### V1 (WIP)
+- Charting + windowed loading + cache (done)
+- Polished UI/UX (done)
+- Indicator system (hot-reload + renderer) (In progress)
+- Renko
+- Integrate more exchanges (spot + futures pairs)
+- Working settings menus + theme editor
+
+### V2 (planned)
+- Strategy runtime + backtesting (implementation)
+- Strategy overlays (entries/exits, stops/targets)
+- Deep backtester
+- Market realism (fees, funding, slippage models)
+- Expanded indicator library
+
+### V3 (planned)
+- Portfolio backtesting (multi-symbol, multi-strategy)
+- Walk-forward / Monte Carlo / optimization
+- Deep backtester scaling + diagnostics
+- Replay mode + advanced analytics
+
+## Run Locally
+```bash
 pip install PyQt6 pyqtgraph requests numpy websocket-client
-```
-3) Run:
-```
 python app/main.py
 ```
 
-## Core Architecture
-- `Architecture.md` contains the full design and requirements.
-- `app/main.py` loads the Qt stylesheet and starts the app.
-- UI lives under `app/ui/`.
-- Charts and rendering helpers are in `app/ui/charts/`.
-- Core logic (data store, fetch, providers) is in `app/core/`.
+## Docs
+- `Architecture.md` — system design + roadmap
+- `INDICATORS.md` — indicator API and plan
+- `STRATEGIES.md` — strategy/backtesting architecture
 
-## Data Flow (Current)
-- Symbol list is pulled from Binance and cached in SQLite (`app/data/ohlcv.sqlite`).
-- Reset Cache fetches recent bars for the selected symbol/timeframe, caches them, and renders.
-- On startup, cached data is extended forward to the present when needed.
-- Live kline updates stream in from Binance WebSocket.
-- Closed live candles are persisted to SQLite.
-
-## Next Steps
-- Add indicator registry + hot-reload.
-
-## SQLite Cache
-- Stored at `app/data/ohlcv.sqlite`.
-- Tables:
-  - `ohlcv` (exchange, symbol, timeframe, ts_ms, open, high, low, close, volume)
-  - `symbols` (exchange, symbol, fetched_at)
+## License
+Apache-2.0

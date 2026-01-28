@@ -1,142 +1,119 @@
 # Architecture
 
-## Scope (v1)
+## Scope (V1)
 - Desktop app using PyQt6 + pyqtgraph.
-- Charting and indicators only (no backtesting yet).
-- Two chart types: candlestick and Renko.
-- Indicators are hot-reloadable from a folder inside the project.
-- Errors from indicators are shown in a dedicated error window/dock.
-- TradingView-like dark theme.
-- External data providers supported: Binance (initial), with extensible adapters for Hyperliquid and MEXC.
-- Local caching for OHLCV using SQLite with incremental fetch on startup (resume from last cached bar).
-- Lazy data loading: fetch a bounded recent window first (e.g., 2k-5k bars) so the chart is usable immediately, then extend on demand.
+- Charting + indicators only (no strategy execution or backtesting yet).
+- Primary chart type: candlestick. Renko to-do.
+- Indicators are hot-reloadable from a local folder.
+- Indicator errors surface in a dedicated error dock.
+- Dark, modern UI theme.
+- Modular data providers (crypto exchanges now, brokers later).
+- Local OHLCV cache in SQLite with incremental fetch.
+- Windowed loading: render a bounded visible range + buffer and extend on demand.
 
 ## High-level design
-The app is a single desktop process with a clean split:
-- UI layer: PyQt6 widgets, chart rendering, user controls.
-- Core layer: data models, chart transformations (Renko), indicator registry, and hot-reload.
+Single-process desktop app with a clean split:
+- UI layer: widgets, chart rendering, user controls.
+- Core layer: data fetch + cache, transforms, indicator runtime, hot reload.
 
-Indicators are loaded as Python modules from `app/indicators/` and called to compute series. The UI requests indicator updates; the core computes them and returns series to render. When a module changes, a file watcher triggers a reload and re-renders indicators if the indicator is active. Errors are captured and surfaced in the error dock without crashing the app or clearing valid chart data.
-Data is fetched on demand based on the chart's visible time range, using a lookback buffer to support indicators that need history. Additional ranges are fetched as the user pans/zooms or changes timeframe/symbol.
-Initial load is a bounded recent window so the chart renders fast; background backfill can extend older history in chunks while the chart remains usable.
-The symbol list is fetched from the exchange (Binance first) at startup and cached locally; the UI uses this cache for search/selection.
-The data store supports explicit historical backfill: requesting older ranges than currently cached (e.g., add 20,000 earlier bars) triggers a bounded fetch for that prior window and merges it into the cache. This is exposed as a UI action (e.g., "Load more history") and a core API that can fetch by bar count or time range.
+Indicators are Python modules in `app/indicators/` and are loaded by the registry.
+The UI requests indicator updates; the core computes series and returns render
+instructions. When a module changes, the file watcher reloads and re-renders
+active indicators. Errors are captured and shown in the error dock without
+clearing the last good render.
 
-## Future extensions (post-v1)
+Data is fetched based on the visible chart window with a lookback buffer to
+support indicators. Additional ranges are fetched as the user pans/zooms or
+changes symbol/timeframe. Initial load is a bounded recent window so the chart
+renders fast; background backfill extends older history in chunks while the
+chart remains usable.
+
+## Future extensions (post-V1)
 - Strategy execution and backtesting.
-- Trade execution from the dashboard (broker/exchange adapters, order management, risk controls).
+- Deep backtester (custom engine).
+- Strategy management (hot reload, params, execution logs).
+- Broker/exchange live execution adapters.
 - Market scanner module.
-- Deep backtester (Backtrader or custom engine integration).
-- Strategy management (hot-reload Python strategies, parameter UI, execution logs).
-- Simple drawing tools, trendlines etc
+- Drawing tools (trendlines, annotations).
 
 ## Folder structure
 - `app/main.py`: app entrypoint
 - `app/ui/`: PyQt6 widgets and views
   - `main_window.py`: top-level window, layout, docks
-  - `chart_view.py`: chart renderer (candles or Renko)
-  - `indicator_panel.py`: indicator selection and parameters
-  - `error_dock.py`: error display and history
-- `app/ui/charts/`: chart renderers and helpers
+  - `chart_view.py`: chart controller + data orchestration
+  - `indicator_panel.py`: indicator selection + params
+  - `error_dock.py`: error display + history
+  - `debug_dock.py`: live metrics
+- `app/ui/charts/`: chart renderers + helpers
   - `candlestick_chart.py`: candlestick renderer
-  - `renko_chart.py`: renko renderer
-  - `line_chart.py`: line renderer
+  - `renko_chart.py`: renko renderer (planned)
+  - `line_chart.py`: line renderer (planned)
   - `volume_histogram.py`: volume overlay
   - `performance.py`: visible-range + LOD helpers
 - `app/ui/theme/`: UI styling and theme tokens
-  - `theme.py`: TradingView-like dark palette and style constants
-  - `app.qss`: Qt stylesheet for widgets, docks, and panels
+  - `theme.py`: palette + style constants
+  - `app.qss`: Qt stylesheet
 - `app/core/`: non-UI logic
-  - `data_store.py`: OHLCV source, SQLite cache, incremental fetch
-  - `data_providers/`: exchange adapters (Binance first, Hyperliquid/MEXC ready)
-  - `renko_builder.py`: Renko transform
-  - `indicator_registry.py`: discovery + schema + hot-reload
+  - `data_store.py`: SQLite cache + queries
+  - `data_fetch.py`: cache-first fetch + window loading
+  - `data_providers/`: exchange adapters (Binance first)
+  - `indicator_registry.py`: indicator discovery + schema
   - `hot_reload.py`: file watcher + debounce
-  - `schema.py`: indicator schema types and validation
-- `app/indicators/`: user indicators (folder per indicator)
-  - `indicator.py`: indicator module
+  - `schema.py`: indicator schema types/validation
+  - `renko_builder.py`: Renko transform (planned)
+- `app/indicators/`: indicator modules
+  - `builtins/`: shipped indicators
+  - `custom/`: user indicators
 
 ## Chart types
 ### Candlestick
 - Renders raw OHLCV bars.
-- Time axis is UTC seconds.
+- Time axis uses UTC epoch milliseconds.
 
-### Renko
-- Built from raw OHLCV (server-side transform, not a view-only trick).
-- Uses `renko_builder.py` to generate synthetic bricks for both charting and indicators.
-- Renko bricks are price-action based (not time-based); time fields are derived from source data for plotting only.
-#### Renko parameters (initial)
-- `brick_pct`: fixed brick size as percent of price.
-- `use_dynamic_renko`: enable ATR-based dynamic brick sizing.
-- `atr_lookback`: ATR period for dynamic mode.
-- `atr_multiplier`: scale ATR to compute brick size.
-- `min_brick_pct`: floor for dynamic brick size.
+### Renko (to-do)
+- Built from OHLCV using a transform (not view-only).
+- Bricks are price-action based; time fields are derived for plotting.
+- Dynamic sizing uses ATR with optional floor.
 
 ## Chart interactions
-- Mouse wheel zooms the time scale (TradingView-like behavior).
-- Dragging on the price scale (left axis) adjusts price scaling.
+- Mouse wheel zooms time scale.
+- Dragging on the price scale adjusts Y-axis.
+- Crosshair + hover labels show O/H/L/C + change.
 
 ## Volume histogram
-- Rendered as an overlay in the main chart area (not a separate pane).
-- Scales to a fraction of the visible price range (e.g., 10-20% height).
-- Uses LOD sampling (based on visible bars) to keep rendering fast.
+- Overlay in the main chart area (not a separate pane).
+- Scales to a fraction of the visible price range.
+- Uses LOD sampling based on visible bars.
 
 ## LOD (level of detail)
-- Use visible range sampling to limit rendering cost when many bars are in view.
-- If visible bars exceed a dense threshold (e.g., 2000), render every Nth bar.
-- Optionally draw a simplified line path for dense views to maintain continuity.
+- Visible-range sampling limits rendering cost at high bar counts.
+- Windowed loading prevents full-history render by default.
 
-## Line chart rendering (for non-candlestick views)
-- Line series uses downsampling/LOD for large datasets.
-- Optional pulsing dot on the latest price for live updates.
-- Bid/ask lines are drawn as dashed horizontal lines when live data is available.
-
-## Candlestick rendering
-- Custom candlestick item with LOD sampling based on visible range.
-- Uses per-bar colors (up/down or indicator highlights).
-- Draws a simplified line path in dense views for continuity.
-- Optionally overlays a "current" candle and bid/ask lines during live updates.
-
-## Indicator contract
-Each indicator module should expose:
-
-- `def schema() -> dict`
-  - Provides id, name, and input definitions (type, default, min, max, step).
-- `def compute(bars, params) -> dict`
-  - `bars`: list of dicts with `time, open, high, low, close, volume`.
-  - Returns `{series_name: [(time, value), ...]}`.
-
-Example:
-```
-{
-  "id": "sma",
-  "name": "SMA",
-  "inputs": {
-    "length": {"type": "int", "default": 20, "min": 2, "max": 200}
-  }
-}
-```
+## Indicator contract (current)
+Each indicator module exposes:
+- `schema() -> dict` (id, name, inputs, defaults)
+- `compute(bars, params) -> dict`
+  - `bars`: NumPy OHLCV arrays
+  - returns render payloads (series / bands / markers)
 
 ## Hot-reload behavior
-- Watch `app/indicators/**/indicator.py`.
-- On change, compute file hash.
+- Watch `app/indicators/*.py` (builtins + custom).
 - Debounce 300-800ms.
-- If active indicator changed, recompute and re-render.
-- On error, show error in error dock and keep last good render.
+- If an active indicator changes, recompute + re-render.
+- On error, show in error dock and keep last good render.
 
 ## Error handling
-- Errors are collected with: indicator id, error type, traceback, timestamp.
-- Error dock shows latest error and a short history list.
-- The chart should remain interactive even with indicator errors.
+- Errors capture indicator id, error type, traceback, timestamp.
+- Error dock shows latest error and a short history.
+- Chart remains interactive even with indicator errors.
 
 ## Theme
-- Dark theme similar to TradingView.
-- Define a single theme module or constants for:
-  - background, grid, text, axis, candle colors, volume colors.
+- Dark theme with consistent tokens for background, grid, text, axes,
+  candle colors, and volume colors.
 
 ## Invariants
-- All times are UTC seconds.
+- All times are UTC epoch milliseconds.
 - Indicators never mutate input data.
-- Chart rendering is deterministic for a given dataset + indicator params.
-- Cached data is authoritative unless a gap is detected; startup fetch fills from last cached timestamp forward.
-- No full-history fetch by default; initial load is bounded to a time window + lookback.
+- Rendering is deterministic for a given dataset + params.
+- Cache is authoritative unless a gap is detected.
+- Initial load is a bounded window + lookback; no full-history fetch by default.
