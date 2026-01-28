@@ -2,7 +2,7 @@
 
 Desktop charting app with TradingView-like dark theme, candlestick/Renko(TODO) charting, hot-reloadable indicators(TODO), and cached exchange data (SQLite).
 
-## Current Status - V1 WIP
+## Current Status - V1 WIP - not up-to-date
 - PyQt6 app scaffolded with dark theme and chart view.
 - Candlestick chart rendering wired with volume overlay and gridlines.
 - Binance OHLCV fetch + SQLite caching implemented.
