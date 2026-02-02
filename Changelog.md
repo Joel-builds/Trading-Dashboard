@@ -145,3 +145,12 @@
 - Throttled backfill decision frequency when zoomed out to avoid extra work during pans.
 - Suppressed live indicator and volume histogram recomputes while zoomed out (tail updates still apply).
 - Cached indicator outputs per window and reuse cached values on pan/zoom instead of recomputing.
+
+## 0.8.0
+- Added a full strategy system initially planned for V2 (schema validation, registry, hot-reload, built-in strategies).
+- Implemented deterministic single-symbol backtesting (next-open market fills, warmup gating, fixed bps fees/slippage).
+- Added strategy context API (bars, params, indicator caching, sizing helpers, run logs).
+- Built the backtest engine + broker + portfolio accounting (orders, trades, equity curve, drawdown).
+- Added strategy UI docks (Strategy panel with param forms + run config; Report dock with equity curve + trade list).
+- Persisted runs, orders, trades, equity, and logs to a dedicated strategy.sqlite store.
+- Added strategy report normalization (stats + markers) and chart overlays for entries/exits.

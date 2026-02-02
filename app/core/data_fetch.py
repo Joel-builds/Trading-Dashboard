@@ -221,6 +221,57 @@ def load_window_bars(
     return [list(row) for row in cached]
 
 
+def load_range_bars(
+    store: DataStore,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    start_ms: int,
+    end_ms: int,
+    allow_fetch: bool = True,
+) -> List[List[float]]:
+    if start_ms >= end_ms:
+        return []
+    interval_ms = timeframe_to_ms(timeframe)
+
+    def _missing_ranges(rows: List[List[float]]) -> List[Tuple[int, int]]:
+        if not rows:
+            return [(start_ms, end_ms)]
+        missing: List[Tuple[int, int]] = []
+        if int(rows[0][0]) > start_ms + int(interval_ms * 0.5):
+            missing.append((start_ms, int(rows[0][0]) - interval_ms))
+        prev_ts = int(rows[0][0])
+        for row in rows[1:]:
+            ts = int(row[0])
+            if interval_ms > 0 and ts - prev_ts > interval_ms * 1.5:
+                missing.append((prev_ts + interval_ms, ts - interval_ms))
+            prev_ts = ts
+        if int(rows[-1][0]) < end_ms - int(interval_ms * 0.5):
+            missing.append((int(rows[-1][0]) + interval_ms, end_ms))
+        return [(s, e) for s, e in missing if s < e]
+
+    cached = store.load_bars(exchange, symbol, timeframe, start_ms, end_ms)
+    cached_list = [list(row) for row in cached]
+    missing = _missing_ranges(cached_list)
+    if missing and allow_fetch:
+        for miss_start, miss_end in missing:
+            bars = binance.fetch_ohlcv(symbol, timeframe, miss_start, miss_end)
+            if bars:
+                store.store_bars(exchange, symbol, timeframe, bars)
+        cached = store.load_bars(exchange, symbol, timeframe, start_ms, end_ms)
+        cached_list = [list(row) for row in cached]
+        missing = _missing_ranges(cached_list)
+    if missing:
+        # If missing data is only at the very end (beyond latest available bar), allow it.
+        if cached_list:
+            last_ts = int(cached_list[-1][0])
+            trailing_only = all(m[0] >= last_ts for m in missing)
+            if trailing_only:
+                return cached_list
+        raise ValueError(f"Missing OHLCV data for range {start_ms}-{end_ms}: {missing}")
+    return cached_list
+
+
 def timeframe_to_ms(timeframe: str) -> int:
     if not timeframe:
         return 60_000

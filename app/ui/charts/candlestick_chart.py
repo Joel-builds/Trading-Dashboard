@@ -2,7 +2,7 @@ from bisect import bisect_left, bisect_right
 from datetime import datetime
 import math
 import time
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple, Dict, Any
 
 import numpy as np
 import pyqtgraph as pg
@@ -16,6 +16,7 @@ from .volume_histogram import (
     MAX_VISIBLE_BARS_DENSE,
     calculate_lod_step,
 )
+from .strategy_overlay import StrategyOverlayRenderer
 
 
 class VolumePrepWorker(QThread):
@@ -428,6 +429,7 @@ class CandlestickChart:
         self.empty_label: Optional[pg.QtWidgets.QGraphicsTextItem] = None
         self.history_end_reached = False
         self._ts_cache: List[float] = []
+        self.strategy_overlay: Optional[StrategyOverlayRenderer] = None
         self._candle_width_ms = 60_000 * 0.8
         self._render_count = 0
         self._render_last_ts = time.time()
@@ -986,10 +988,20 @@ class CandlestickChart:
             self._ts_cache = []
             self.item.set_data([])
             self._update_volume_histogram([])
+            if self.strategy_overlay is not None:
+                try:
+                    self.strategy_overlay.set_markers([])
+                except Exception:
+                    pass
             self._show_empty_state()
             return
         self.candles = normalized_data
         self._ts_cache = [float(c[0]) for c in self.candles]
+        if self.strategy_overlay is not None:
+            try:
+                self.strategy_overlay.set_ts_cache(self._ts_cache)
+            except Exception:
+                pass
         self.item.candle_width_ms = self._candle_width_ms
         self.item.set_data(self.candles, bar_colors=self.bar_colors)
         if self._bulk_update:
@@ -1004,6 +1016,34 @@ class CandlestickChart:
         self._hide_empty_state()
         if auto_range:
             self._auto_range()
+
+    def set_strategy_markers(self, markers: List[Dict[str, Any]]) -> None:
+        if self.strategy_overlay is None:
+            self.strategy_overlay = StrategyOverlayRenderer(markers)
+            try:
+                self.strategy_overlay.setZValue(25)
+                plot_item = self.plot_widget.getPlotItem()
+                plot_item.addItem(self.strategy_overlay)
+            except Exception:
+                pass
+            if self._ts_cache:
+                try:
+                    self.strategy_overlay.set_ts_cache(self._ts_cache)
+                except Exception:
+                    pass
+            return
+        try:
+            self.strategy_overlay.set_markers(markers)
+        except Exception:
+            pass
+
+    def get_time_range(self) -> Tuple[Optional[int], Optional[int]]:
+        if not self._ts_cache:
+            return None, None
+        try:
+            return int(self._ts_cache[0]), int(self._ts_cache[-1])
+        except Exception:
+            return None, None
 
     def begin_bulk_update(self) -> None:
         self._bulk_update = True

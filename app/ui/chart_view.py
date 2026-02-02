@@ -4,7 +4,7 @@ import time
 import uuid
 from bisect import bisect_left, bisect_right
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Callable
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QCompleter, QButtonGroup, QTabBar, QStyle, QLineEdit, QMenu
@@ -12,9 +12,15 @@ from PyQt6.QtGui import QFont, QColor, QLinearGradient, QBrush, QIcon
 from PyQt6.QtCore import QThread, pyqtSignal, QSortFilterProxyModel, Qt, QTimer, QSettings, QSize
 
 from core.data_store import DataStore
-from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars, timeframe_to_ms, ensure_history_floor
+from core.data_fetch import load_recent_bars, load_symbols, load_more_history, load_cached_bars, load_cached_full, load_window_bars, load_range_bars, timeframe_to_ms, ensure_history_floor
 from core.indicator_registry import discover_indicators, IndicatorInfo
-from core.hot_reload import start_watcher, IndicatorHotReloadWorker
+from core.hot_reload import start_watcher, IndicatorHotReloadWorker, GenericHotReloadWorker
+from core.strategies.registry import discover_strategies, StrategyInfo, start_strategy_watcher
+from core.strategies.schema import validate_schema, resolve_params
+from core.strategies.backtest import run_backtest
+from core.strategies.report import build_report
+from core.strategies.store import StrategyStore
+from core.strategies.models import RunConfig
 from .theme import theme
 from .charts.candlestick_chart import CandlestickChart
 from indicators.runtime import run_compute
@@ -207,6 +213,54 @@ class IndicatorComputeWorker(QThread):
             return output
         return output
 
+
+class StrategyBacktestWorker(QThread):
+    finished = pyqtSignal(str, object, object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
+
+    def __init__(
+        self,
+        store: DataStore,
+        strategy_info: StrategyInfo,
+        params: dict,
+        run_config: RunConfig,
+        exchange: str,
+        cancel_flag: Callable[[], bool],
+    ) -> None:
+        super().__init__()
+        self._store = store
+        self._strategy_info = strategy_info
+        self._params = params
+        self._run_config = run_config
+        self._exchange = exchange
+        self._cancel_flag = cancel_flag
+
+    def run(self) -> None:
+        try:
+            bars = load_range_bars(
+                self._store,
+                self._exchange,
+                self._run_config.symbol,
+                self._run_config.timeframe,
+                self._run_config.start_ts - (self._run_config.warmup_bars * timeframe_to_ms(self._run_config.timeframe)),
+                self._run_config.end_ts,
+                allow_fetch=True,
+            )
+            if not bars:
+                raise ValueError("No bars returned for strategy backtest")
+            bars_np = np.asarray(bars, dtype=np.float64)
+            result, status = run_backtest(
+                bars_np,
+                self._strategy_info.module,
+                self._params,
+                self._run_config,
+                cancel_flag=self._cancel_flag,
+                progress_cb=lambda i, n: self.progress.emit(i, n),
+            )
+            self.finished.emit(status, result, bars_np)
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 class CandleNormalizeWorker(QThread):
     result = pyqtSignal(int, list, list, int)
@@ -425,7 +479,8 @@ class LiveTradeWorker(QThread):
 
 
 class ChartView(QWidget):
-    def __init__(self, error_sink=None, debug_sink=None, indicator_panel=None) -> None:
+    visible_ts_range_changed = pyqtSignal(int, int)
+    def __init__(self, error_sink=None, debug_sink=None, indicator_panel=None, strategy_panel=None, strategy_report=None) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -530,10 +585,13 @@ class ChartView(QWidget):
         self.error_sink = error_sink
         self.debug_sink = debug_sink
         self.indicator_panel = indicator_panel
+        self.strategy_panel = strategy_panel
+        self.strategy_report = strategy_report
 
         self.candles = CandlestickChart(self.plot_widget, theme.UP, theme.DOWN)
         self._setup_data_store()
         self._setup_indicator_system()
+        self._setup_strategy_system()
         self._load_symbols()
         self._debug_last_update = 0.0
         self._tab_syncing = False
@@ -622,6 +680,8 @@ class ChartView(QWidget):
         self._pending_apply_bars: Optional[list] = None
         self._pending_apply_auto_range = False
         self._pending_backfill_view: Optional[tuple[float, float]] = None
+        self._last_visible_ts_range: Optional[tuple[int, int]] = None
+        self._emitting_visible_range = False
         self._window_bars = 2000
         self._window_buffer_bars = 500
         self._window_start_ms: Optional[int] = None
@@ -674,6 +734,17 @@ class ChartView(QWidget):
         self._backfill_decision_last_ms = 0
         self._indicator_next_pane_index = 1
         self._last_live_indicator_ms = 0
+        self._strategy_paths = [
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "strategies", "builtins")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "strategies", "custom")),
+        ]
+        self._strategy_defs: Dict[str, StrategyInfo] = {}
+        self._strategy_hot_reload: Optional[GenericHotReloadWorker] = None
+        self._strategy_worker: Optional[StrategyBacktestWorker] = None
+        self._strategy_cancel_requested = False
+        self._strategy_store: Optional[StrategyStore] = None
+        self._active_strategy_report = None
+        self._strategy_finish_in_progress = False
         self._last_visible_bars = 0
 
     def _setup_indicator_system(self) -> None:
@@ -682,6 +753,22 @@ class ChartView(QWidget):
         self._wire_indicator_panel()
         self._start_indicator_hot_reload()
         self._recompute_indicators(immediate=True, reason="view")
+
+    def _setup_strategy_system(self) -> None:
+        self._load_strategy_definitions()
+        self._start_strategy_hot_reload()
+        if self.strategy_panel is not None:
+            try:
+                self.strategy_panel.set_strategies(self._build_strategy_panel_items())
+                self.strategy_panel.run_requested.connect(self._on_strategy_run_requested)
+                self.strategy_panel.stop_requested.connect(self._on_strategy_stop_requested)
+            except Exception:
+                pass
+        if self.strategy_report is not None:
+            try:
+                self.strategy_report.trade_selected.connect(self.jump_to_ts)
+            except Exception:
+                pass
 
     def _load_indicator_definitions(self) -> None:
         indicators = discover_indicators(self._indicator_paths)
@@ -1010,6 +1097,261 @@ class ChartView(QWidget):
 
     def _on_indicator_error(self, message: str) -> None:
         self._report_error(f'Indicator reload failed: {message}')
+
+    def _load_strategy_definitions(self) -> None:
+        strategies = discover_strategies(self._strategy_paths)
+        self._strategy_defs = {info.strategy_id: info for info in strategies}
+        if self.strategy_panel is not None:
+            try:
+                self.strategy_panel.set_strategies(self._build_strategy_panel_items())
+            except Exception:
+                pass
+
+    def _start_strategy_hot_reload(self) -> None:
+        if self._strategy_hot_reload is not None:
+            return
+        self._strategy_hot_reload = start_strategy_watcher(
+            self._strategy_paths,
+            self._on_strategies_updated,
+            self._on_strategy_error,
+            poll_interval=1.0,
+        )
+
+    def _on_strategies_updated(self, strategies: List[StrategyInfo]) -> None:
+        self._strategy_defs = {info.strategy_id: info for info in strategies}
+        if self.strategy_panel is not None:
+            try:
+                self.strategy_panel.set_strategies(self._build_strategy_panel_items())
+            except Exception:
+                pass
+
+    def _on_strategy_error(self, message: str) -> None:
+        self._report_error(f'Strategy reload failed: {message}')
+
+    def _build_strategy_panel_items(self) -> List[dict]:
+        items: List[dict] = []
+        for info in self._strategy_defs.values():
+            schema_fn = getattr(info.module, "schema", None)
+            if schema_fn is None:
+                continue
+            try:
+                schema = schema_fn()
+            except Exception:
+                self._report_error(f"Strategy schema error: {info.strategy_id}")
+                continue
+            ok, err = validate_schema(schema)
+            if not ok:
+                self._report_error(f"Strategy schema invalid: {err}")
+                continue
+            params = resolve_params(schema, {})
+            items.append({
+                "strategy_id": info.strategy_id,
+                "name": info.name,
+                "schema": schema,
+                "params": params,
+            })
+        return items
+
+    def _ensure_strategy_store(self) -> StrategyStore:
+        if self._strategy_store is None:
+            path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "strategy.sqlite"))
+            self._strategy_store = StrategyStore(path)
+        return self._strategy_store
+
+    def _on_strategy_run_requested(self, strategy_id: str, params: dict, run_cfg: dict) -> None:
+        info = self._strategy_defs.get(strategy_id)
+        if info is None:
+            self._report_error(f'Strategy not found: {strategy_id}')
+            return
+        schema = getattr(info.module, "schema", None)
+        if not schema:
+            self._report_error(f'Strategy schema missing: {strategy_id}')
+            return
+        schema_dict = schema()
+        ok, err = validate_schema(schema_dict)
+        if not ok:
+            self._report_error(f'Strategy schema invalid: {err}')
+            return
+        resolved = resolve_params(schema_dict, params)
+        if run_cfg.get("use_visible_range"):
+            ts_min, ts_max = self.get_visible_ts_range_snapshot()
+            start_ts = ts_min
+            end_ts = ts_max
+        else:
+            start_ts = int(run_cfg.get("start_ts"))
+            end_ts = int(run_cfg.get("end_ts"))
+        try:
+            range_min, range_max = self.candles.get_time_range()
+            if range_min is not None and range_max is not None:
+                if start_ts < range_min:
+                    start_ts = range_min
+                if end_ts > range_max:
+                    end_ts = range_max
+        except Exception:
+            pass
+        if start_ts >= end_ts:
+            self._report_error("Invalid backtest range")
+            return
+        config = RunConfig(
+            symbol=self.symbol_box.currentText() or "BTCUSDT",
+            timeframe=self.current_timeframe,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            warmup_bars=int(run_cfg.get("warmup_bars", 200)),
+            initial_cash=float(run_cfg.get("initial_cash", 1000.0)),
+            leverage=float(run_cfg.get("leverage", 1.0)),
+            commission_bps=float(run_cfg.get("commission_bps", 0.0)),
+            slippage_bps=float(run_cfg.get("slippage_bps", 0.0)),
+        )
+        self._strategy_cancel_requested = False
+        if self._strategy_worker is not None and self._strategy_worker.isRunning():
+            self._report_error("Strategy backtest already running")
+            return
+        worker = StrategyBacktestWorker(
+            self.store,
+            info,
+            resolved,
+            config,
+            self.exchange,
+            cancel_flag=lambda: self._strategy_cancel_requested,
+        )
+        self._strategy_worker = worker
+        worker.finished.connect(lambda status, result, bars_np: self._on_strategy_finished(status, result, info, resolved, config, bars_np))
+        worker.error.connect(lambda msg: self._report_error(f"Backtest failed: {msg}"))
+        worker.start()
+
+    def _on_strategy_stop_requested(self) -> None:
+        self._strategy_cancel_requested = True
+
+    def _on_strategy_finished(self, status: str, result, info: StrategyInfo, params: dict, config: RunConfig, bars_np: np.ndarray) -> None:
+        if self._strategy_finish_in_progress:
+            return
+        self._strategy_finish_in_progress = True
+        run_id = f"run_{int(time.time() * 1000)}"
+        report = build_report(
+            run_id=run_id,
+            trades=getattr(result, "trades", []),
+            equity_ts=getattr(result, "equity_ts", []),
+            equity=getattr(result, "equity", []),
+            drawdown=getattr(result, "drawdown", []),
+        )
+        try:
+            bar_min = int(bars_np[0][0])
+            bar_max = int(bars_np[-1][0])
+            self._report_error(
+                f"Backtest done ({status}). Bars={len(bars_np)} range={bar_min}..{bar_max} equity_pts={len(report.equity_ts)} trades={len(report.trades)}."
+            )
+            if len(report.trades) == 0:
+                fast = getattr(result, "_debug_fast", None)
+                slow = getattr(result, "_debug_slow", None)
+                fast_val = float(fast[-1]) if fast is not None and len(fast) else "n/a"
+                slow_val = float(slow[-1]) if slow is not None and len(slow) else "n/a"
+                self._report_error(f"EMA fast/slow sample: {fast_val} / {slow_val}")
+                cross = getattr(result, "_debug_cross", None)
+                if cross is not None:
+                    self._report_error(f"EMA crosses: up={cross[0]} down={cross[1]}")
+        except Exception:
+            self._report_error(
+                f"Backtest done ({status}). equity_pts={len(report.equity_ts)} trades={len(report.trades)}."
+            )
+        if not report.equity_ts:
+            try:
+                bar_min = int(bars_np[0][0])
+                bar_max = int(bars_np[-1][0])
+            except Exception:
+                bar_min = None
+                bar_max = None
+            self._report_error(
+                f"Backtest produced no equity points. Range {config.start_ts}..{config.end_ts}, bars {bar_min}..{bar_max}."
+            )
+        store = None
+        try:
+            store = self._ensure_strategy_store()
+        except Exception:
+            store = None
+        if store is not None:
+            try:
+                store.create_run({
+                    "run_id": run_id,
+                    "created_at": int(time.time() * 1000),
+                    "strategy_id": info.strategy_id,
+                    "strategy_name": info.name,
+                    "strategy_path": info.path,
+                    "symbol": config.symbol,
+                    "timeframe": config.timeframe,
+                    "start_ts": config.start_ts,
+                    "end_ts": config.end_ts,
+                    "warmup_bars": config.warmup_bars,
+                    "initial_cash": config.initial_cash,
+                    "leverage": config.leverage,
+                    "commission_bps": config.commission_bps,
+                    "slippage_bps": config.slippage_bps,
+                    "status": status,
+                    "params_json": json.dumps(params),
+                    "error_text": None,
+                })
+                orders_payload = [
+                    {
+                        "submitted_ts": order.submitted_ts,
+                        "fill_ts": order.fill_ts,
+                        "side": order.side,
+                        "size": order.size,
+                        "fill_price": order.fill_price,
+                        "fee": order.fee,
+                        "status": order.status,
+                        "reason": order.reason,
+                    }
+                    for order in getattr(result, "orders", [])
+                ]
+                trades_payload = [
+                    {
+                        "side": trade.side,
+                        "size": trade.size,
+                        "entry_ts": trade.entry_ts,
+                        "entry_price": trade.entry_price,
+                        "exit_ts": trade.exit_ts,
+                        "exit_price": trade.exit_price,
+                        "pnl": trade.pnl,
+                        "fee_total": trade.fee_total,
+                        "bars_held": trade.bars_held,
+                    }
+                    for trade in report.trades
+                ]
+                equity_payload = [
+                    {
+                        "ts": ts,
+                        "equity": eq,
+                        "drawdown": dd,
+                        "position_size": 0.0,
+                        "price": 0.0,
+                    }
+                    for ts, eq, dd in zip(report.equity_ts, report.equity, report.drawdown)
+                ]
+                messages_payload = list(getattr(result, "logs", []))
+
+                store.insert_orders(run_id, orders_payload)
+                store.insert_trades(run_id, trades_payload)
+                store.insert_equity_points(run_id, equity_payload)
+                store.insert_messages(run_id, messages_payload)
+            except Exception:
+                pass
+        report.run_id = run_id
+        def _apply_report():
+            try:
+                if self.strategy_report is not None:
+                    self.strategy_report.set_report(report)
+            except Exception:
+                pass
+            try:
+                # Temporarily disabled marker overlay to isolate recursion
+                pass
+            except Exception:
+                pass
+            self._strategy_finish_in_progress = False
+        try:
+            QTimer.singleShot(0, _apply_report)
+        except Exception:
+            _apply_report()
 
     def _wire_indicator_panel(self) -> None:
         if self.indicator_panel is None:
@@ -2027,6 +2369,20 @@ class ChartView(QWidget):
             except Exception:
                 pass
             self._indicator_hot_reload = None
+        if self._strategy_hot_reload is not None:
+            try:
+                self._strategy_hot_reload.stop()
+                self._strategy_hot_reload.wait(1500)
+            except Exception:
+                pass
+            self._strategy_hot_reload = None
+        if self._strategy_worker is not None and self._strategy_worker.isRunning():
+            try:
+                self._strategy_cancel_requested = True
+                self._strategy_worker.quit()
+                self._strategy_worker.wait(1500)
+            except Exception:
+                pass
         if self._kline_worker is not None:
             self._kline_worker.stop()
             self._kline_worker.wait(1500)
@@ -2144,6 +2500,21 @@ class ChartView(QWidget):
             x_max = x_range[1]
         except Exception:
             return
+        if not self._emitting_visible_range:
+            try:
+                ts_min = int(x_min)
+                ts_max = int(x_max)
+            except Exception:
+                ts_min = None
+                ts_max = None
+            if ts_min is not None and ts_max is not None:
+                if self._last_visible_ts_range != (ts_min, ts_max):
+                    self._last_visible_ts_range = (ts_min, ts_max)
+                    self._emitting_visible_range = True
+                    try:
+                        self.visible_ts_range_changed.emit(ts_min, ts_max)
+                    finally:
+                        self._emitting_visible_range = False
         tf_ms = self.candles.timeframe_ms or 60_000
         span = x_max - x_min
         span_bars = span / tf_ms if tf_ms > 0 else span
@@ -2167,6 +2538,10 @@ class ChartView(QWidget):
                 self._clamp_in_progress = False
             return
         self._pending_backfill_view = (x_min, x_max)
+        try:
+            self.visible_ts_range_changed.emit(int(x_min), int(x_max))
+        except Exception:
+            pass
         self._view_idle_timer.start(self._apply_idle_delay_ms)
         if span_bars and span_bars >= self._indicator_freeze_visible_bars:
             self._indicator_idle_timer.start(self._indicator_idle_ms)
@@ -2286,6 +2661,29 @@ class ChartView(QWidget):
             return int(candles[0][0]), int(candles[-1][0])
         except Exception:
             return None, None
+
+    def get_visible_ts_range_snapshot(self) -> tuple[int, int]:
+        try:
+            view_box = self.plot_widget.getViewBox()
+            x_range, _ = view_box.viewRange()
+            return int(x_range[0]), int(x_range[1])
+        except Exception:
+            now_ms = int(time.time() * 1000)
+            tf_ms = self.candles.timeframe_ms or 60_000
+            return now_ms - tf_ms * 200, now_ms
+
+    def jump_to_ts(self, ts_ms: int) -> None:
+        try:
+            tf_ms = self.candles.timeframe_ms or 60_000
+            span = tf_ms * 400
+            start = max(0, int(ts_ms - span / 2))
+            end = int(ts_ms + span / 2)
+            self._pending_backfill_view = (float(start), float(end))
+            self._start_fetch('window', self.symbol_box.currentText() or 'BTCUSDT', self.current_timeframe, 0, window_start_ms=start, window_end_ms=end)
+            view_box = self.plot_widget.getViewBox()
+            view_box.setXRange(start, end, padding=0)
+        except Exception:
+            pass
 
     def _refresh_history_end_status(self) -> None:
         try:

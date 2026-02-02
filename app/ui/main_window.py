@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from PyQt6.QtWidgets import QMainWindow, QDockWidget, QTabWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget, QMenuBar, QFileDialog, QStyle
 from PyQt6.QtGui import QAction, QPixmap
 from PyQt6.QtCore import Qt, QSettings, QPoint, QRect
@@ -7,6 +8,8 @@ from .chart_view import ChartView
 from .indicator_panel import IndicatorPanel
 from .error_dock import ErrorDock
 from .debug_dock import DebugDock
+from .strategy_panel import StrategyPanel
+from .strategy_report import StrategyReportDock
 
 
 class TitleBar(QWidget):
@@ -88,12 +91,16 @@ class MainWindow(QMainWindow):
         self._press_geo: Optional[QRect] = None
 
         self.indicator_panel = IndicatorPanel()
+        self.strategy_panel = StrategyPanel()
+        self.strategy_report = StrategyReportDock()
         self.error_dock = ErrorDock()
         self.debug_dock = DebugDock()
         self.chart_view = ChartView(
             error_sink=self.error_dock,
             debug_sink=self.debug_dock,
             indicator_panel=self.indicator_panel,
+            strategy_panel=self.strategy_panel,
+            strategy_report=self.strategy_report,
         )
 
         self._menu_bar = QMenuBar()
@@ -109,10 +116,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.indicator_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.strategy_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.strategy_report)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.error_dock)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.debug_dock)
 
-        self.tabifyDockWidget(self.indicator_panel, self.error_dock)
+        self.tabifyDockWidget(self.indicator_panel, self.strategy_panel)
+        self.tabifyDockWidget(self.strategy_panel, self.strategy_report)
+        self.tabifyDockWidget(self.strategy_report, self.error_dock)
         self.tabifyDockWidget(self.error_dock, self.debug_dock)
         self.setTabPosition(Qt.DockWidgetArea.RightDockWidgetArea, QTabWidget.TabPosition.East)
         self.indicator_panel.raise_()
@@ -126,6 +137,8 @@ class MainWindow(QMainWindow):
         try:
             style = self.style()
             self.indicator_panel.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+            self.strategy_panel.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_CommandLink))
+            self.strategy_report.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView))
             self.error_dock.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_MessageBoxCritical))
             self.debug_dock.setWindowIcon(style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
         except Exception:
@@ -226,7 +239,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(export_action)
 
         self._dock_actions = []
-        for dock in (self.indicator_panel, self.error_dock, self.debug_dock):
+        for dock in (self.indicator_panel, self.strategy_panel, self.strategy_report, self.error_dock, self.debug_dock):
             action = QAction(dock.windowTitle(), self)
             action.setCheckable(True)
             action.setChecked(not dock.isHidden())
