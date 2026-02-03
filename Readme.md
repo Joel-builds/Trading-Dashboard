@@ -44,10 +44,12 @@ local so it’s fast, private, and scalable.
 - Provide in-application monitoring and management for deployed strategies
 
 ### V3 (planned)
+- Broker/exchange live execution adapters
 - Portfolio backtesting (multi-symbol, multi-strategy)
 - Walk-forward / Monte Carlo / optimization
 - Deep backtester scaling + diagnostics
 - Replay mode + advanced analytics
+- Market scanner module
 
 ## Run Locally
 ```bash
