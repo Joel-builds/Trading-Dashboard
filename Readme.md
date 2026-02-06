@@ -10,7 +10,7 @@ local so it’s fast, private, and scalable.
 - High-performance charting with windowed loading and LOD
 - SQLite cache + live market streams
 - Indicator system under development
-- Strategy runtime + backtesting architecture planned
+- Strategy runtime + backtesting under development
 - Deep backtester architecture planned
 - Clean, modern dark-theme UI
 
@@ -20,30 +20,36 @@ local so it’s fast, private, and scalable.
 - Modular data providers (main exchanges now, brokers later)
 
 ## Status
-**V1 is WIP.** Core charting is stable, indicators are under active development.
+**V1 is WIP.** Core charting is stable, indicators and backtesting are under active development.
 
 ## Roadmap
 
 ### V1 (WIP)
 - Charting + windowed loading + cache (done)
 - Polished UI/UX (done)
-- Indicator system (hot-reload + renderer) (In progress)
+- Indicator system (hot-reload + renderer) (in progress)
+- Strategy runtime + backtesting (in progress)
+- Strategy overlays (entries/exits, stops/targets) (in progress)
 - Renko
 - Integrate more exchanges (spot + futures pairs)
 - Working settings menus + theme editor
 
 ### V2 (planned)
-- Strategy runtime + backtesting (implementation)
-- Strategy overlays (entries/exits, stops/targets)
 - Deep backtester
 - Market realism (fees, funding, slippage models)
 - Expanded indicator library
+- Drawing tools
+- Integrate additional stock exchanges and brokerage platforms
+- Export strategies as deployable CLI packages for Linux VPS execution
+- Provide in-application monitoring and management for deployed strategies
 
 ### V3 (planned)
+- Broker/exchange live execution adapters
 - Portfolio backtesting (multi-symbol, multi-strategy)
 - Walk-forward / Monte Carlo / optimization
 - Deep backtester scaling + diagnostics
 - Replay mode + advanced analytics
+- Market scanner module
 
 ## Run Locally
 ```bash
